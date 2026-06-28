@@ -14,7 +14,10 @@ pin a ``":memory:"`` connection + a FakeTransport-backed runtime, and
 """
 from __future__ import annotations
 
+import os
 import sqlite3
+
+from fastmcp.server.dependencies import get_access_token
 
 from sierra_mcp import audit
 from sierra_mcp.runtime import SierraRuntime
@@ -51,18 +54,55 @@ def get_runtime() -> SierraRuntime:
     return _runtime
 
 
-def granted_scopes() -> set[str]:
-    """Scopes granted to the current operator (MVP: read+write+delete)."""
+# --------------------------------------------------------------------------- #
+# authorization — derived from the validated WorkOS token (plan 015, #5)
+# --------------------------------------------------------------------------- #
+
+def _subject_allowlist() -> set[str]:
+    """Allowed token subjects (email or sub) from ``SIERRA_MCP_SUBJECT_ALLOWLIST``
+    (comma-separated). Empty/unset ⇒ allow any *authenticated* subject."""
+    raw = os.environ.get("SIERRA_MCP_SUBJECT_ALLOWLIST", "")
+    return {s.strip() for s in raw.split(",") if s.strip()}
+
+
+def _require_allowed(claims: dict) -> str:
+    """Return the subject (email→sub→'authenticated'); raise ``PermissionError`` if
+    an allowlist is configured and neither the email nor sub is on it. Fail-closed."""
+    email, sub = claims.get("email"), claims.get("sub")
+    subject = email or sub or "authenticated"
+    allow = _subject_allowlist()
+    if allow and not (allow & ({email, sub, subject} - {None})):
+        raise PermissionError(
+            f"subject {subject!r} is not in SIERRA_MCP_SUBJECT_ALLOWLIST"
+        )
+    return subject
+
+
+def _scopes_from_claims(claims: dict) -> set[str]:
+    """Map token claims → granted scopes. WorkOS does not emit custom scopes yet,
+    so a valid + allowlisted subject gets the full operator grant. SEAM: when
+    ``sierra:read/write/delete`` are issued, map the ``scope`` claim here (one change)."""
     return set(_GRANTED_SCOPES)
 
 
-def actor() -> str:
-    """Identity recorded in the audit trail.
+def granted_scopes() -> set[str]:
+    """Scopes for the current request. Authenticated → allowlist-gated grant;
+    no token (auth-disabled loopback dev) → operator full grant (preserves tests)."""
+    tok = get_access_token()
+    if tok is None:
+        return set(_GRANTED_SCOPES)
+    claims = tok.claims or {}
+    _require_allowed(claims)
+    return _scopes_from_claims(claims)
 
-    MVP returns the constant operator; Phase 3 will derive it from the request's
-    WorkOS auth subject.
-    """
-    return ACTOR
+
+def actor() -> str:
+    """Identity recorded in the audit trail (non-repudiation). Authenticated →
+    token ``email``/``sub`` (allowlist-gated); no token → the constant operator (dev)."""
+    tok = get_access_token()
+    if tok is None:
+        return ACTOR
+    return _require_allowed(tok.claims or {})
 
 
 # --------------------------------------------------------------------------- #
