@@ -18,6 +18,9 @@ RUN useradd --create-home appuser
 USER appuser
 WORKDIR /home/appuser/app
 COPY --chown=appuser:appuser . .
+# Persistent dir for the SQLite audit/ledger db (mounted as a named volume in compose).
+# Created appuser-owned so a fresh named volume inherits writable ownership on first mount.
+RUN mkdir -p /home/appuser/app/var
 EXPOSE 8080
 # FastMCP Streamable-HTTP app (MCP at /mcp/, health at /health).
 CMD ["uvicorn", "sierra_mcp.server:app", "--host", "0.0.0.0", "--port", "8080"]

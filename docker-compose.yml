@@ -9,5 +9,13 @@ services:
     restart: unless-stopped
     env_file:
       - .env                       # /root/sierra-mcp/.env on the box (mode 600), git-ignored
+    environment:
+      # Audit/ledger SQLite db lives on the named volume below (survives restarts/redeploys).
+      - SIERRA_MCP_DB_PATH=/home/appuser/app/var/sierra_mcp.db
     ports:
       - "127.0.0.1:8080:8080"      # localhost only; Caddy reverse-proxies sierra.tastyautomations.com → here
+    volumes:
+      - sierra-audit:/home/appuser/app/var
+
+volumes:
+  sierra-audit:                    # append-only audit trail + cleanup ledger; do not prune
