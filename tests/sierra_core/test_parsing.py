@@ -52,3 +52,25 @@ def test_unwrap_returns_ordinary_dict_without_error_markers():
     assert unwrap_response(_envelope({"id": 1, "name": "ok"})) == {"id": 1, "name": "ok"}
     # 'Message' alone (no StackTrace/ExceptionType) is NOT treated as an error.
     assert unwrap_response(_envelope({"Message": "hi", "id": 2})) == {"Message": "hi", "id": 2}
+
+
+# --------------------------------------------------------------------------- #
+# W5-T1a (re-audit #2 new MEDIUM): a TOP-LEVEL ASP.NET fault (no "d" wrapper) must raise.
+# Pre-fix d=outer.get("d")=None, the dict-guard at parsing.py:58 was dead code, and
+# unwrap returned None -> faulted reads looked empty and faulted writes recorded ok.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("body", [
+    '{"Message":"Object reference not set","StackTrace":"at X.Y()"}',
+    '{"Message":"boom","ExceptionType":"System.NullReferenceException"}',
+    '{"d": null, "Message": "faulted", "StackTrace": "at Z()"}',  # d present-but-null + fault
+])
+def test_unwrap_raises_on_top_level_aspnet_fault(body):
+    with pytest.raises(EndpointError):
+        unwrap_response(body)
+
+
+def test_unwrap_top_level_message_alone_is_not_a_fault():
+    # A bare top-level Message with no StackTrace/ExceptionType is NOT a fault (conservative,
+    # mirrors the d-wrapped behavior) — no "d" wrapper means the legacy None return stands.
+    assert unwrap_response('{"Message":"hi"}') is None

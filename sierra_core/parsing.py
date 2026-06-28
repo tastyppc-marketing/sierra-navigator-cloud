@@ -26,6 +26,17 @@ def unwrap_response(text: str) -> Any:
     except Exception as e:
         raise EndpointError(f"json parse outer failed: {e}", raw=(text or "")[:300])
     d = outer.get("d") if isinstance(outer, dict) else outer
+    # A genuine ASP.NET page-method fault carries NO "d" wrapper, so `d` is None and the
+    # dict-guard below never fires. Detect the fault on the TOP-LEVEL body and raise, so a
+    # faulted READ never degrades to {}/[] and a faulted non-delete WRITE is never audited
+    # result="ok" (#9's twin on the read/non-delete-write surface — re-audit #2 MEDIUM).
+    if (
+        d is None
+        and isinstance(outer, dict)
+        and "Message" in outer
+        and ("StackTrace" in outer or "ExceptionType" in outer)
+    ):
+        raise EndpointError(f"server error: {outer.get('Message')}", raw=outer)
     if isinstance(d, str):
         try:
             d = json.loads(d)
