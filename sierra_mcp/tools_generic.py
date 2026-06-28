@@ -56,6 +56,25 @@ _DESTRUCTIVE_FRAGMENTS = ("Delete", "Deletion")
 # sitting MID-name behind a benign leading verb (re-audit #3 HIGH).
 _CAMEL_TOKEN_RE = re.compile(r"[A-Z][a-z0-9]*")
 
+
+def _verb_forms(v: str) -> set:
+    """Regular inflections of a verb token: base, -s, -ed/-d, -ing (dropping a trailing
+    'e' before -ing). EXACT forms (no prefix matching) so 'Movie'/'Movement' never match
+    'Move' and 'Avoid' never matches 'Void'."""
+    forms = {v, v + "s"}
+    if v.endswith("e"):
+        forms |= {v + "d", v[:-1] + "ing"}   # Disable -> Disabled, Disabling
+    else:
+        forms |= {v + "ed", v + "ing"}       # Clean -> Cleaned, Cleaning
+    return forms
+
+
+# Every destructive verb plus its regular inflections, so a gerund/past form behind a
+# benign leading verb (TestVoiceAndText**Disabling**Finish, ...**Expiring**Numbers) is
+# caught in a would-be WRITE — while exact membership avoids 'Movie'/'Movement'-style
+# false positives (re-audit #4 HIGH; the inflected siblings W6-T1's exact-token check missed).
+_DESTRUCTIVE_FORMS = frozenset().union(*(_verb_forms(v) for v in _DESTRUCTIVE_VERBS))
+
 # Entity deletes that DO have a Tier-1 identity-locked flow — route the caller there.
 _TIER1_DELETE_HINTS = ("ContentPage", "SavedSearch")
 
@@ -122,7 +141,7 @@ def _is_destructive(method: str) -> bool:
     # A READ (led by Get/Check/Validate/…) is a query, so a destructive token there is
     # benign (GetLeadsForMerge, CheckAbilityToRemoveAdminUser) and must stay read (#7).
     if not _starts_with_verb(method, _READ_VERBS) and any(
-        tok in _DESTRUCTIVE_SET for tok in _CAMEL_TOKEN_RE.findall(method)
+        tok in _DESTRUCTIVE_FORMS for tok in _CAMEL_TOKEN_RE.findall(method)
     ):
         return True
     return False

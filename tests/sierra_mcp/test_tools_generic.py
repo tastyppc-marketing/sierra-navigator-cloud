@@ -286,6 +286,25 @@ def test_classify_destructive_verb_anywhere_in_method(path, expected):
     assert tools_generic.classify(path) == expected
 
 
+@pytest.mark.parametrize("path,expected", [
+    # re-audit #4 HIGH: INFLECTED/gerund destructive verbs mid-name in a would-be WRITE —
+    # 3 more real catalogued voice-and-text endpoints W6-T1's exact-token match missed.
+    ("/voice-and-text-settings.aspx/TestVoiceAndTextDisablingFinish", "refused"),
+    ("/voice-and-text-settings.aspx/TestVoiceAndTextTrackManualDisabling", "refused"),
+    ("/voice-and-text-settings.aspx/TestVoiceAndTextNotifyExpiringNumbers", "refused"),
+    ("/x.aspx/SaveReleasingBatch", "refused"),     # Releasing
+    ("/x.aspx/UpdateRemovedItems", "refused"),     # Removed
+    # reads with an inflected destructive token stay READ (a query never commits)
+    ("/x.aspx/GetExpiringNumbers", "read"),
+    ("/x.aspx/CheckDisablingStatus", "read"),
+    # NO false positive: forms are EXACT, so 'Mov'-prefixed words are not destructive
+    ("/x.aspx/SaveMovieMetadata", "write"),        # "Movie" != any form of "Move"
+    ("/x.aspx/UpdateMovementLog", "write"),        # "Movement" != Move forms
+])
+def test_classify_inflected_destructive_verbs(path, expected):
+    assert tools_generic.classify(path) == expected
+
+
 def test_real_cancel_and_softdelete_endpoints_refused_e2e(ctx):
     # The three real catalogued mutation endpoints the re-audit flagged are refused +
     # audited, NOT executed on the live read/write path.
