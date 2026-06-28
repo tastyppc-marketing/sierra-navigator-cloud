@@ -1,4 +1,7 @@
 # tests/sierra_core/test_session.py
+import threading
+import time as _time
+
 from sierra_core.session import SessionBroker, Session
 
 
@@ -52,3 +55,55 @@ def test_session_carries_base_url():
     b = SessionBroker(login_fn=make_login(c), clock=FakeClock(), ttl_seconds=1800)
     s = b.get_session()
     assert s.base_url == "https://client7.sierrainteractivedev.com"
+
+
+# --------------------------------------------------------------------------- #
+# W1-T4 (#10): broker lock — single-flight login, TOCTOU-safe invalidate/get
+# --------------------------------------------------------------------------- #
+
+def test_concurrent_cold_start_logs_in_exactly_once():
+    c = {"n": 0}
+
+    def slow_login():
+        c["n"] += 1                       # runs under the broker lock (single-flight)
+        _time.sleep(0.05)                 # hold so the other threads pile on the lock
+        return Session(cookies={"k": "v"}, site_id=4989,
+                       base_url="https://client7.sierrainteractivedev.com")
+
+    b = SessionBroker(login_fn=slow_login, clock=FakeClock(), ttl_seconds=1800)
+    results: list[Session] = []
+    threads = [threading.Thread(target=lambda: results.append(b.get_session()))
+               for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert c["n"] == 1                              # one login, no stampede
+    assert len({id(r) for r in results}) == 1       # all share the one session
+    assert all(r.site_id == 4989 for r in results)
+
+
+def test_invalidate_get_race_raises_no_attributeerror():
+    c = {"n": 0}
+    b = SessionBroker(login_fn=make_login(c), clock=FakeClock(), ttl_seconds=1800)
+    b.get_session()  # prime the cache
+    errors: list[Exception] = []
+
+    def getter():
+        try:
+            for _ in range(200):
+                b.get_session()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    def invalidator():
+        for _ in range(200):
+            b.invalidate()
+
+    ts = ([threading.Thread(target=getter) for _ in range(4)]
+          + [threading.Thread(target=invalidator) for _ in range(2)])
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert errors == [], f"invalidate/get race raised: {errors!r}"

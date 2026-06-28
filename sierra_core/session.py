@@ -10,6 +10,7 @@ browser. Phase-0 proved ASP.NET forms-auth works over plain httpx.
 """
 from __future__ import annotations
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -144,20 +145,37 @@ class SessionBroker:
         self._clock = clock
         self._ttl = ttl_seconds
         self._session: Optional[Session] = None
+        self._lock = threading.Lock()
+
+    def _cached_if_fresh(self, now: float) -> Optional[Session]:
+        # Read the reference ONCE so a concurrent invalidate() can't null it between
+        # the None-check and the .created_at access (the TOCTOU AttributeError, #10).
+        s = self._session
+        if s is not None and (now - s.created_at) < self._ttl:
+            return s
+        return None
 
     def get_session(self, force_refresh: bool = False) -> Session:
-        now = self._clock()
-        if (
-            not force_refresh
-            and self._session is not None
-            and now - self._session.created_at < self._ttl
-        ):
-            return self._session
-        s = self._login_fn()
-        s.created_at = now
-        self._session = s
-        return s
+        # Fast path: a fresh cached session needs no lock.
+        if not force_refresh:
+            cached = self._cached_if_fresh(self._clock())
+            if cached is not None:
+                return cached
+        # Slow path: single-flight login under the lock (double-checked), so a burst
+        # of concurrent callers at expiry triggers exactly ONE login — not a stampede
+        # against the single Sierra credential.
+        with self._lock:
+            if not force_refresh:
+                cached = self._cached_if_fresh(self._clock())
+                if cached is not None:
+                    return cached
+            now = self._clock()
+            s = self._login_fn()
+            s.created_at = now
+            self._session = s
+            return s
 
     def invalidate(self) -> None:
         """Drop the cached session so the next get_session() re-authenticates."""
-        self._session = None
+        with self._lock:
+            self._session = None
