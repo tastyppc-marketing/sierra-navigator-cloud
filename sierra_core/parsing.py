@@ -42,8 +42,15 @@ def unwrap_response(text: str) -> Any:
                 return d.get("data")
             if "Data" in d and d.get("Data") is not None:
                 return d.get("Data")
-            return {k: v for k, v in d.items()
-                    if k not in ("responseCode", "ResponseCode", "Data", "Message", "message")}
+            # Strip the envelope bookkeeping but PRESERVE a non-empty business-rule
+            # message: at responseCode==0 Sierra still reports soft failures (e.g. a
+            # blocked delete) in the message body, not via the status code (#9). Empty
+            # messages are dropped so a bare responseCode:0 success stays an empty dict.
+            return {
+                k: v for k, v in d.items()
+                if k not in ("responseCode", "ResponseCode", "Data")
+                and not (k in ("Message", "message") and not v)
+            }
         # No responseCode contract. An ASP.NET page-method exception serializes (even
         # at HTTP 200) as {"Message": ..., "StackTrace"|"ExceptionType": ...}. Raise
         # instead of returning it as if it were valid data (#9). Conservative: only the

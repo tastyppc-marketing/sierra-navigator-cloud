@@ -14,6 +14,33 @@ from sierra_core.errors import WriteNotAllowed, EndpointError, IdentityLockError
 from sierra_core.transport import Transport
 
 
+def _assert_delete_ack(result: Any, *, what: str) -> None:
+    """Require a POSITIVE Sierra acknowledgment for a delete (#9).
+
+    A delete must NOT be reported as success merely because nothing raised. At HTTP 200
+    Sierra can return: a non-``d`` ASP.NET fault (``unwrap_response`` yields ``None``), a
+    business-rule rejection carrying a ``Message``/``error``, or an empty body (a bare
+    ``responseCode:0`` after stripping). Treat all of those as FAILURE — only a non-empty,
+    error-marker-free payload counts as a delete. Fail loud rather than flip the recovery
+    ledger and report PASS for a row that still exists.
+    """
+    if isinstance(result, dict):
+        for k in ("Message", "message", "error", "errors", "exceptionMessage", "ExceptionType"):
+            v = result.get(k)
+            if v:
+                raise EndpointError(f"{what} rejected by Sierra: {v}", raw=result)
+        if result.get("success") is False:
+            raise EndpointError(f"{what} reported success=false", raw=result)
+        # An empty dict is Sierra's bare ``responseCode:0`` success (no body) — accept it.
+        # A ``responseCode:0`` that still carries a business-rule *message* is surfaced by
+        # the loop above, because unwrap_response now PRESERVES a non-empty message rather
+        # than stripping it (#9); so a soft rejection no longer masquerades as an empty ack.
+        return
+    if result:  # truthy non-dict (e.g. an id or True) is a positive ack
+        return
+    raise EndpointError(f"{what}: no response body — cannot confirm deletion", raw=result)
+
+
 class SierraHttpClient:
     """Browserless Sierra admin client.  Identical endpoint semantics to the
     legacy SierraXhrClient, but calls a Transport instead of page.evaluate(fetch)."""
@@ -396,10 +423,11 @@ class SierraHttpClient:
             entity_id=page_id,
         )
         snapshot_sink(record)  # MUST happen before the irreversible delete
-        self._call(
+        ack = self._call(
             "/content-pages.aspx/DeleteContentPage",
             {"pageId": int(page_id)},
         )
+        _assert_delete_ack(ack, what=f"delete_content_page(id={page_id})")
         return {"deleted": int(page_id), "reversible": False}
 
     def delete_saved_search(
@@ -431,8 +459,9 @@ class SierraHttpClient:
             entity_id=search_id,
         )
         snapshot_sink(record)
-        self._call(
+        ack = self._call(
             "/saved-searches.aspx/DeleteSavedSearch",
             {"siteId": str(self.site_id), "savedSearchId": int(search_id)},
         )
+        _assert_delete_ack(ack, what=f"delete_saved_search(id={search_id})")
         return {"deleted": int(search_id), "reversible": True}
