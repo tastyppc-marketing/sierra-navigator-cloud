@@ -22,5 +22,7 @@ COPY --chown=appuser:appuser . .
 # Created appuser-owned so a fresh named volume inherits writable ownership on first mount.
 RUN mkdir -p /home/appuser/app/var
 EXPOSE 8080
-# FastMCP Streamable-HTTP app (MCP at /mcp/, health at /health).
-CMD ["uvicorn", "sierra_mcp.server:app", "--host", "0.0.0.0", "--port", "8080"]
+# FastMCP Streamable-HTTP app (MCP at /mcp, health at /health). The entrypoint binds
+# SIERRA_MCP_BIND_HOST (default 0.0.0.0) via sierra_mcp.server.main — the SAME value
+# the no-auth loopback gate checks, so the bind can't diverge from the gate (#4/#13).
+CMD ["python", "-m", "sierra_mcp.server"]

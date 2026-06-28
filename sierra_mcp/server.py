@@ -426,3 +426,32 @@ async def health(request):  # noqa: ANN001 - Starlette Request
 # ASGI entrypoint. The MCP protocol is mounted at /mcp by default; /health is
 # the custom route above. Must be built AFTER all tools/resources/routes register.
 app = mcp.http_app()
+
+
+# --------------------------------------------------------------------------
+# Container / console entrypoint
+# --------------------------------------------------------------------------
+
+def main() -> None:
+    """Run the server under uvicorn, binding the host from ``SIERRA_MCP_BIND_HOST``.
+
+    Critically, the bind host comes from :func:`sierra_mcp.auth.resolved_bind_host` —
+    the SAME value ``build_auth()``'s loopback gate checks — so a no-auth dev config
+    (``SIERRA_MCP_ALLOW_NO_AUTH=1 + SIERRA_MCP_BIND_HOST=127.0.0.1``) can never bind a
+    network-reachable socket behind the gate's back (#4/#13). Port from
+    ``SIERRA_MCP_PORT`` (default 8080). The container CMD is ``python -m
+    sierra_mcp.server`` so this is the single, authoritative bind site.
+    """
+    import os
+
+    import uvicorn
+
+    from sierra_mcp.auth import resolved_bind_host
+
+    host = resolved_bind_host()
+    port = int((os.environ.get("SIERRA_MCP_PORT") or "8080").strip())
+    uvicorn.run(app, host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()

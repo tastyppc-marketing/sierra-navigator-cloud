@@ -42,3 +42,40 @@ def test_authkit_provider_constructed_when_both_set():
         pytest.skip(f"AuthKitProvider unavailable in this env: {e}")
     assert provider is not None
     assert type(provider).__name__ == "AuthKitProvider"
+
+
+# ========================================================================== #
+# W4-T2 (re-audit #4/#13 CRITICAL): the no-auth loopback gate must key off the
+# host uvicorn ACTUALLY binds, not an advisory var that can diverge from the real
+# socket. resolved_bind_host() is the single source of truth shared by the server
+# entrypoint and build_auth.
+# ========================================================================== #
+
+def test_resolved_bind_host_default_is_network_reachable():
+    from sierra_mcp.auth import resolved_bind_host
+    # Unset -> 0.0.0.0 (all interfaces) — the real uvicorn default, NOT a loopback
+    # the gate would wrongly trust.
+    assert resolved_bind_host({}) == "0.0.0.0"
+    assert resolved_bind_host({"SIERRA_MCP_BIND_HOST": "127.0.0.1"}) == "127.0.0.1"
+    assert resolved_bind_host({"SIERRA_MCP_BIND_HOST": "  0.0.0.0  "}) == "0.0.0.0"
+
+
+def test_server_entrypoint_binds_the_same_host_the_auth_gate_checks(monkeypatch):
+    # The defining fix for #4/#13: server.main() must bind resolved_bind_host() — the
+    # EXACT value build_auth()'s loopback gate evaluates — so a `BIND_HOST=127.0.0.1 +
+    # ALLOW_NO_AUTH=1` config can't bind 0.0.0.0 behind the gate's back.
+    import uvicorn
+    from sierra_mcp import server
+    from sierra_mcp.auth import resolved_bind_host
+
+    monkeypatch.setenv("SIERRA_MCP_BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("SIERRA_MCP_PORT", "8080")
+    captured = {}
+    monkeypatch.setattr(
+        uvicorn, "run",
+        lambda app, host=None, port=None, **kw: captured.update(host=host, port=port),
+    )
+    server.main()
+    assert captured["host"] == "127.0.0.1"
+    assert captured["host"] == resolved_bind_host()  # bind == auth-gate source of truth
+    assert captured["port"] == 8080

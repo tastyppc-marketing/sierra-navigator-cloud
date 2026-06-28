@@ -28,6 +28,21 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # including an unset bind host — is treated as network-reachable (fail-closed).
 _LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
+# Default uvicorn bind when SIERRA_MCP_BIND_HOST is unset: all interfaces (network-
+# reachable), so the no-auth gate fails closed unless the operator explicitly pins a
+# loopback bind. This is the value the server entrypoint ACTUALLY binds.
+DEFAULT_BIND_HOST = "0.0.0.0"
+
+
+def resolved_bind_host(env: dict | None = None) -> str:
+    """The host uvicorn will actually bind — the SINGLE source of truth shared by the
+    server entrypoint (:func:`sierra_mcp.server.main`) and :func:`build_auth`'s loopback
+    gate. Tying both to this one value closes the #4/#13 divergence where the gate keyed
+    off an advisory env var while the container hardcoded ``--host 0.0.0.0``.
+    """
+    environ = os.environ if env is None else env
+    return (environ.get("SIERRA_MCP_BIND_HOST") or DEFAULT_BIND_HOST).strip()
+
 
 def build_auth(env: dict | None = None) -> Any | None:
     """Return a configured ``AuthKitProvider`` or ``None`` (auth-disabled mode).
@@ -50,7 +65,7 @@ def build_auth(env: dict | None = None) -> Any | None:
     allow_no_auth = (
         (environ.get("SIERRA_MCP_ALLOW_NO_AUTH") or "").strip().lower() in _TRUTHY
     )
-    bind_host = (environ.get("SIERRA_MCP_BIND_HOST") or "").strip().lower()
+    bind_host = resolved_bind_host(environ).lower()
     is_loopback = bind_host in _LOOPBACK
 
     if not authkit_domain:
