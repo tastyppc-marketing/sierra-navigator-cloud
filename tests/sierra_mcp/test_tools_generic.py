@@ -5,6 +5,7 @@ import json
 import pytest
 
 from sierra_core.client import SierraHttpClient
+from sierra_core.errors import EndpointError
 from sierra_core.transport import FakeTransport
 from sierra_mcp import audit, context, tools_generic
 from sierra_mcp.runtime import SierraRuntime
@@ -181,6 +182,23 @@ def test_write_path_dry_run_sends_nothing_then_commit_verbatim(ctx):
     assert (
         "sierra_call:/content-page-form.aspx/AddContentLabel", "commit", "ok"
     ) in _audit_triples(ctx.conn)
+
+
+def test_sierra_call_write_raises_on_business_rule_rejection(ctx):
+    # re-audit #4 MEDIUM: a Tier-2 generic WRITE commit must assert a positive Sierra ack —
+    # a responseCode:0 + non-empty Message is a soft rejection, not a committed write.
+    body = {"name": "Dup Label"}
+    ft = ctx.wire({
+        "/content-page-form.aspx/AddContentLabel":
+            env({"responseCode": 0, "message": "Label name already in use"}),
+    })
+    token = tools_generic.sierra_call(
+        "/content-page-form.aspx/AddContentLabel", body
+    )["confirm_token"]  # dry-run mints a token, sends nothing
+    with pytest.raises(EndpointError):
+        tools_generic.sierra_call(
+            "/content-page-form.aspx/AddContentLabel", body, confirm_token=token
+        )
 
 
 def test_write_commit_token_reuse_rejected(ctx):

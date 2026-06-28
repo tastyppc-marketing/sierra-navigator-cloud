@@ -87,6 +87,12 @@ class SierraHttpClient:
         """
         if write:
             self._ensure_write("call")
+            result = self._call(path, body or {})
+            # Tier-2 generic writes must assert a positive Sierra ack too (re-audit #4
+            # MEDIUM): a responseCode:0 + business-rule Message is a soft-rejection, not a
+            # commit — W6-T2 wired this only on the typed write methods, not here.
+            _assert_mutation_ack(result, what=f"sierra_call({path})")
+            return result
         return self._call(path, body or {})
 
     # ---- reads -------------------------------------------------------
