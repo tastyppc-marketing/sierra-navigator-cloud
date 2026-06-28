@@ -421,12 +421,19 @@ GENERIC_TOOL_NAMES: tuple[str, ...] = (
 @mcp.resource("resource://sierra/endpoints", mime_type="application/json")
 def sierra_endpoints() -> str:
     """The 642-endpoint Sierra admin XHR map, keyed by URL path (JSON)."""
+    # Gate the catalogue behind the same subject allowlist + read scope as the read tools,
+    # auditing denials — resources skipped context.authorize and so were readable by any
+    # authenticated-but-unauthorized caller (re-audit #5 MEDIUM).
+    context.authorize(context.get_conn(), tool="resource:endpoints", action="read", scope="read")
     return json.dumps(load_catalogue().get("by_url", {}))
 
 
 @mcp.resource("resource://sierra/endpoints/verified", mime_type="text/markdown")
 def sierra_endpoints_verified() -> str:
     """Human-written reference of verified Sierra endpoints (Markdown)."""
+    context.authorize(
+        context.get_conn(), tool="resource:endpoints/verified", action="read", scope="read"
+    )
     return verified_endpoints_markdown()
 
 

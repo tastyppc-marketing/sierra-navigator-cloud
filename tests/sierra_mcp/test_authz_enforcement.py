@@ -93,3 +93,24 @@ def test_write_tool_denies_non_allowlisted_subject_and_audits(conn, monkeypatch)
     with pytest.raises(PermissionError):
         tools_write.create_content_label("L")  # dry-run; authorize denies before mint
     assert any(t == "create_content_label" for t, _, _ in _rejected(conn))
+
+
+# --- re-audit #5 MEDIUM: catalogue RESOURCES are gated too (not just tools) -------- #
+
+def test_catalogue_resource_denies_non_allowlisted_and_audits(conn, monkeypatch):
+    monkeypatch.setenv("SIERRA_MCP_SUBJECT_ALLOWLIST", "allowed@firm.com")
+    monkeypatch.setattr(context, "get_access_token", lambda: _Tok({"email": "intruder@evil.com"}))
+    with pytest.raises(PermissionError):
+        server.sierra_endpoints()
+    with pytest.raises(PermissionError):
+        server.sierra_endpoints_verified()
+    rejected_tools = {t for t, _, _ in _rejected(conn)}
+    assert "resource:endpoints" in rejected_tools
+    assert "resource:endpoints/verified" in rejected_tools
+
+
+def test_catalogue_resource_allows_authorized_caller(conn, monkeypatch):
+    monkeypatch.setattr(context, "get_access_token", lambda: None)  # no token -> operator
+    out = server.sierra_endpoints()
+    assert out.startswith("{")           # returns the catalogue JSON
+    assert _rejected(conn) == []         # no denial row on an authorized read
