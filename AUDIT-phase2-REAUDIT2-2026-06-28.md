@@ -1,0 +1,76 @@
+# Phase 2 RE-AUDIT #2 — 2026-06-28 (adversarial, post-Wave-4)
+
+Run `wf_59592313-f56` · **71 agents** · 5.68M tokens · 940 tool calls · ~37 min.
+Verifies Wave 4 (commits 6c890b9..f0ecf5a) closed re-audit #1's 1 CRIT + 4 HIGH, and hunts new regressions. Closure pass covered all 17 originals + the 5 New-* findings; 8-dimension fresh sweep + 3-lens refutation.
+
+**Outcome: GO for the SUPERVISED MANUAL first deploy.** 18/22 closed, #15 deferred-accepted, 3 partial (#9 MED, #14 MED, #17 LOW) + 1 new MEDIUM (top-level ASP.NET fault on non-delete paths). NO open CRITICAL/HIGH; no Wave-4 regression. Must-fix before UNSUPERVISED/autonomous operation: unwrap top-level-fault guard + #9 post-delete re-fetch (one combined fix) and #14 secret handling. These drive **Wave 5**.
+
+---
+
+Both load-bearing claims are confirmed against the actual code: the new MEDIUM finding (parsing.py:28/58 — fault guard operates on the unwrapped `d`, which is `None` for a real top-level fault, so it is dead code and `return d` yields `None`; `_record(None)→{}`, `_rows(None)→[]`, and non-delete writes discard the `None` → `result="ok"`), and the #9 residual (`_assert_delete_ack` accepts `{}`/`d`-wrapped empty-message as a positive delete, while a top-level fault → `None` → line 41 raises, so the delete path alone is hardened). Writing the report.
+
+## Executive summary
+
+All CRITICAL and HIGH findings from the first audit are CLOSED. The two CRITICAL conditions (unauthenticated, delete-capable public exposure — #4/#13) are eliminated on the canonical container/`python -m sierra_mcp.server` entrypoint because the no-auth gate and the real socket now derive from one `resolved_bind_host()` (auth.py:37-44; server.py:468), and an auth-enabled boot with an empty subject allowlist fails closed at import (auth.py:113-119). The destructive-classification, authz-enforcement, SQLite-concurrency, volume-cap, session-stampede, and ledger-snapshot HIGHs are all closed and regression-locked, and I could not bypass the fail-closed `classify()` to delete/destroy any entity via the generic caller, nor reach the fail-open scope/actor branch under enabled auth. **No new CRITICAL or HIGH regression was introduced by Wave 4.** Residuals remain at MEDIUM/LOW: #9 is *partial* (a delete can still report PASS + flip the recovery ledger on an unproven empty-OK silent no-op), #14 *partial* (key-name-only redaction + verbatim ledger snapshot leave non-matching-key secrets/PII and a content-page password in the local SQLite at rest), #17 *partial* (LOW error-string disclosure on returned dicts), and one **new MEDIUM** finding — the same error-surfacing bug class as #9 left unpatched on the read + non-delete-write surface (a top-level ASP.NET HTTP-200 fault returns `None`, surfacing as an empty "success" read and a `result="ok"` committed write). #15 (CI supply-chain hardening) is an accepted, documented deferral. **No open CRITICAL/HIGH ⇒ no blocker to the supervised manual first deploy.**
+
+## Prior findings — closure status
+
+Severities are the original finding severities, inferred from impact except #14/#17 (reviewer-explicit MEDIUM/LOW). "Status" is the post-remediation verdict.
+
+| ID | Severity | Status | One-line evidence |
+|----|----------|--------|-------------------|
+| #1 | HIGH | closed | Fail-closed `classify()` (tools_generic.py:105-120) refuses all 137 destructive of 642 catalogued endpoints; no entity-deleter classifies write; could not bypass to the generic caller. |
+| #2 | HIGH | closed | All 49 `delete`-substring + real `Bulk*` ops → refused before any Sierra contact (tools_generic.py:166-173); only the 2 `Bulk*` reads are getters. |
+| #3 | HIGH | closed | Single `check_same_thread=False` conn + module RLock + `BEGIN IMMEDIATE` across the whole critical section (audit.py:70-94); confirm-token double-spend blocked by lock + rowcount guard; 20-thread stress passes. |
+| #4 | CRITICAL | closed | Auth-before-exposure runbook (DEPLOY.md:54-62 STOP at :61); `AUTHKIT_DOMAIN` required (auth.py:71-77); no-auth honored only on loopback; gate+bind share `resolved_bind_host()`. |
+| #5 | HIGH | closed | Fail-open full-grant/constant-actor branch unreachable under enabled auth (RequireAuth middleware → 401 before any tool); `context.authorize` is the single gate on every read/write/delete; empty-allowlist boot fails closed. |
+| #6 | HIGH | closed | Tier-2 default-deny means every delete routes to Tier-1 `confirm_deletions`, which takes a pre-delete recovery snapshot (tools_write.py:431-444). |
+| #7 | HIGH | closed | `Remove`/`Merge` added to `_DESTRUCTIVE_VERBS`; all 19 `Remove*`/`Merge*` → refused; `_is_destructive` runs before the write allowlist. |
+| #8 | MEDIUM | closed | Every denial (allowlist/scope/token/cap/refused) writes an immutable `result="rejected"` audit row labelled `token_subject()` before re-raising; identity abort stays distinct `aborted`. |
+| #9 | HIGH | **partial** | Delete-ack fix closes all *evidenced* failures (HTTP/responseCode/business-message/ASP.NET), but `_assert_delete_ack` still green-lights an empty-OK body (`{}` / `d`-wrapped empty message) with no post-delete existence re-fetch ⇒ false PASS + ledger flip. **bypass confirmed (residual MEDIUM).** |
+| #10 | HIGH | closed | Login single-flight + double-checked freshness under one lock (session.py:148-176); TOCTOU snapshot of `self._session` to a local; 10-thread → 1 login, 200x getter/invalidate race clean. |
+| #11 | HIGH | closed | `check_and_reserve` does read-check-write of `_counts` inside one `with self._lock` (guards.py:253-260); 100-thread → exactly cap; batch reserved up-front. |
+| #12 | HIGH | closed | `BulkDeleteLeads` caught twice (leading `Bulk` verb + `Delete` fragment) → refused with zero Sierra calls; catalogue-wide sweep finds no irreversible deleter mis-tiered as write. |
+| #13 | CRITICAL | closed | Advisory-var divergence eliminated: gate (auth.py:68) and socket (server.py:468) read the identical `resolved_bind_host()`; container defaults 0.0.0.0 and a leftover `ALLOW_NO_AUTH=1` RuntimeErrors at import. |
+| #14 | MEDIUM | **partial** | Redaction broadened + applied to all 3 audit columns, but it is key-NAME-only (values never inspected) so secrets/PII under non-matching keys persist verbatim in the append-only log; ledger snapshot stored plaintext by design. **bypass confirmed (MEDIUM).** |
+| #15 | MEDIUM | **deferred-accepted** | CI workflow untouched by Wave 4; mutable-tag actions + root SSH + no approval gate, but SSH-to-prod is inert until operator sets `VPS_*` secrets; explicit scope-limited deferral (DEPLOY.md:104-108). |
+| #16 | MEDIUM | closed | Docs canonicalized to `/mcp` (no slash) everywhere; smoke test pins `/mcp`≠3xx and `/mcp/`→307/308→`/mcp`; FastMCP pinned 3.4.2. |
+| #17 | LOW | **partial** | `mask_error_details=True` only sanitizes *raised* exceptions; `propose_deletions`/`confirm_deletions` embed `repr(e)` in *returned* dicts (tools_write.py:333/463/482) — bounded class+message disclosure, no secrets. **bypass confirmed (LOW).** |
+| New-1 | HIGH | closed | `_starts_with_verb` now requires a CamelCase boundary; `Cancel*` (CancelNotification/CancelScheduledMessage) → refused; predicates `Can*` stay read. |
+| New-2 | HIGH | closed | `SetClientDeletionStatusForSavedSearches` and all soft-deletes carrying `Deletion` → refused via the substring fragment; verified over all 642 endpoints. |
+| New-3 | HIGH | closed | All 10 Tier-1 read tools routed through `_guarded_read` → `context.authorize(...,scope="read")` before `runtime.read`; subject allowlist enforced; dashboard direct-read is local-only, unmounted. |
+| New-4 | MEDIUM | closed | Denials caught for both `PermissionError` and `GuardError`, audited `result="rejected"` with `token_subject()` actor, then re-raised; committed in its own outermost transaction. |
+| New-5 | HIGH | closed | Recovery snapshot stored verbatim (lossless) so deletes are reversible; immutable audit_log stays redacted; fidelity tests pass. |
+
+## Blockers
+
+No finding is an **open CRITICAL or HIGH**, and the single new confirmed finding is MEDIUM — so there is no item that blocks the supervised manual first deploy. The three *partial* residuals below are real and must be tracked (they gate UNsupervised/autonomous operation), but none grants an attacker delete/destroy capability they could not already obtain, and none boots the server unauthenticated on the canonical path.
+
+- **#9 — Delete reports PASS + flips the recovery ledger on a silent empty-OK no-op (residual MEDIUM).** `_assert_delete_ack` (client.py:27-41) accepts a bare `responseCode:0`→`{}` or a `d`-wrapped `{"Data":null,"Message":""}` as a positive delete; there is no post-delete existence re-fetch before `confirm_deletions` flips `cleanup_status="deleted"` and reports `identity:PASS` (tools_write.py:488-506). The empty-OK shape is byte-identical to Sierra's documented success envelope and to a real `DeleteSavedSearch` that returned OK while NOT deleting. Held to partial (not open) because every *evidenced* failure on the client's actual two endpoints raises and the no-op shape is unproven there; the pre-delete snapshot is always taken so recovery data still exists. **Fix:** after `_assert_delete_ack`, re-fetch the entity (`GetPage`→not-found / `GetSavedSearchRecord` gone) and require absence before flipping the ledger or reporting PASS.
+- **#14 — Secrets/PII persist in the append-only audit_log and the plaintext ledger (MEDIUM).** Redaction is key-NAME-only (audit.py:222), so values under `pwd`/`pin`/`otp`/`credentials`/`ssn`/`clientPin` and generic PII survive verbatim via the client-controlled generic-caller body (tools_generic.py:181/195/208) into an immutable table that can never be scrubbed; the ledger `payload_snapshot` stores the full deleted record (incl. a content-page access password) plaintext by design. Mitigated: Sierra admin/session creds live in the SessionBroker and never reach these columns. **Fix:** add value-pattern redaction (or an allowlist of safe keys) for audit columns; implement the deferred ledger encryption-at-rest.
+- **#17 — Error-string disclosure on returned dicts (LOW).** `propose_deletions`/`confirm_deletions` return `repr(e)` (verbatim upstream Message/`stored_title`/HTTP status) to the client because `mask_error_details` never fires on a normally-returned dict; Wave 4's `_assert_delete_ack` newly routes verbatim upstream business-rule text into this path. Bounded to class + short message, no secrets/tokens. **Fix:** replace the returned `error` field with a generic string and keep full `repr(e)` only in the audit DB (already captured there).
+
+## New findings
+
+**Confirmed (1) — MEDIUM:** *Top-level ASP.NET fault (HTTP 200) still surfaces as success/empty on every NON-delete path; the Wave-4 #9 fix only hardened the two delete methods* — `sierra_core/parsing.py:58`.
+
+I independently ground-truthed this: at parsing.py:28 `d = outer.get("d")`, so a genuine top-level fault `{"Message":…,"StackTrace":…,"ExceptionType":…}` (which carries no `"d"` wrapper) makes `d=None`; the `isinstance(d, dict)` block at :36 is skipped, the fault guard at :58 never executes, and `unwrap_response` returns `None` (:60). The guard is effectively dead code for the only shape Sierra actually emits. Consequences confirmed in code: reads → `_record(None)→{}` and `_rows(None)→[]` (tools_read.py:45/29), so `get_page` yields `{"record":{}}` and `list_*` yield `{"rows":[],"count":0}` for a faulted Sierra read; non-delete writes (`update_content_label`, `remove_content_label`, `save_html_widget`, `save_content_page`→`{}`, etc.) discard the `None`, so `guarded_write` records an **immutable `result="ok"` audit row** and returns `{"mode":"committed"}` for a write Sierra rejected. The irreversible delete path is *not* affected (top-level fault → `None` → `_assert_delete_ack` raises "no response body"). Two materially harmful manifestations: (1) it corrupts the append-only audit_log/non-repudiation property by recording success for a rejected write; (2) an empty faulted read (`list_content_pages(content_label_id=42)` → "0 pages reference this label") can drive a destructive decision (remove the label / delete pages) on a fault that masqueraded as a clean empty result. It is the unpatched twin of #9 on the read/non-delete-write surface — same root cause, one fix.
+
+**Recommendation:** make `unwrap_response`'s exception-envelope guard evaluate the **top-level** body (`outer`), not the unwrapped `d`, so a non-`d` ASP.NET fault raises on every path; this closes the new finding and tightens #9 in the same change. This is the single highest-value remaining code fix.
+
+No new CRITICAL or HIGH was found. No Wave-4 change introduced a new authz, concurrency, or exposure regression (diffs confirm Wave 4 only swapped in `context.authorize`, widened refusals fail-closed, added the delete-ack/read-gate, and unified the bind host).
+
+## Deploy recommendation
+
+**GO — for the SUPERVISED MANUAL first deploy.** No open CRITICAL or HIGH remains: both unauthenticated-public-exposure CRITICALs (#4/#13) and every authz/concurrency/classification/snapshot HIGH are closed and regression-locked, the destructive-delete surface is fail-closed through the Tier-1 identity-lock + pre-delete snapshot, and the empty-allowlist boot fails closed. The remaining residuals are MEDIUM/LOW and are acceptable under live human supervision.
+
+Conditions for the supervised first deploy (operational, not code-blocking):
+1. Deploy only via the canonical path (`python -m sierra_mcp.server` / container CMD) with `AUTHKIT_DOMAIN` set and `SIERRA_MCP_ALLOW_NO_AUTH` unset; do NOT launch raw `uvicorn --host 0.0.0.0` (the only residual divergence path, and self-contradictory).
+2. For each delete performed during the supervised run, manually confirm in Sierra that the entity is actually gone before trusting `identity:PASS` (covers the #9 empty-OK residual).
+3. Do not treat empty `list_*`/`get_*` read results as authoritative for a destructive decision during the run (covers the new MEDIUM finding's read→delete path).
+
+Must-fix BEFORE any unsupervised/autonomous operation (these would otherwise become elevated, not blockers for the supervised deploy):
+- The `unwrap_response` top-level-fault guard (new MEDIUM) **and** the #9 post-delete existence re-fetch — one combined fix.
+- #14 audit/ledger secret handling if the generic caller will carry credential-bearing bodies.
+
+Explicitly NOT a blocker (accepted deferral): **#15** CI supply-chain hardening. Keep the SSH-to-prod hop inert — do **not** set `VPS_*`/`GHCR_PULL_TOKEN` secrets or enable auto-deploy until SHA-pinned actions + a `environment: production` approval gate + a forced-command deploy key are in place, per the documented Phase-2c plan. (Note within that deferral: the GHCR build+push half and all mutable-tag third-party actions already execute on every push to `main` with `packages: write` + `GITHUB_TOKEN` — a live supply-chain surface that should be hardened soon even though it does not block the manual deploy.)
