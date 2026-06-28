@@ -13,8 +13,10 @@ name: Build & Deploy
 #   GHCR_PULL_TOKEN - a PAT with read:packages so the box can pull the PRIVATE image
 #                     (the runner's GITHUB_TOKEN is not available on the box)
 #
-# Until those secrets exist this workflow will fail at the deploy step — that's expected;
-# the first deploy is done manually per DEPLOY.md. Enable this once the box is set up.
+# The build-deploy job is GATED OFF by default (`if: vars.DEPLOY_ENABLED == 'true'`), so a
+# push to main runs only the `test` job and never emails a failed deploy. The first deploy
+# is manual per DEPLOY.md; set `DEPLOY_ENABLED=true` (plus the secrets above, SHA-pinned
+# actions, and `production` Environment reviewers — #15) to let one push auto-upgrade prod.
 
 on:
   push:
@@ -38,7 +40,15 @@ jobs:
 
   build-deploy:
     needs: test
+    # GATED OFF by default so it never auto-runs (and auto-fails on missing secrets) before
+    # the deploy target exists — a push then runs only `test` and sends NO failed-deploy email.
+    # Enable auto-deploy once the box + secrets are configured:
+    #   gh variable set DEPLOY_ENABLED -b true -R tastyppc-marketing/sierra-navigator-cloud
+    # The first deploy stays manual per DEPLOY.md. Before enabling, also SHA-pin the actions
+    # below and add required reviewers to the `production` Environment (#15 hardening).
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       contents: read
       packages: write
