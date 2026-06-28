@@ -14,15 +14,17 @@ from sierra_core.errors import WriteNotAllowed, EndpointError, IdentityLockError
 from sierra_core.transport import Transport
 
 
-def _assert_delete_ack(result: Any, *, what: str) -> None:
-    """Require a POSITIVE Sierra acknowledgment for a delete (#9).
+def _assert_mutation_ack(result: Any, *, what: str) -> None:
+    """Require a POSITIVE Sierra acknowledgment for a write/delete mutation (#9; re-audit
+    #3 MEDIUM extends it to non-delete writes).
 
-    A delete must NOT be reported as success merely because nothing raised. At HTTP 200
+    A mutation must NOT be reported as success merely because nothing raised. At HTTP 200
     Sierra can return: a non-``d`` ASP.NET fault (``unwrap_response`` yields ``None``), a
-    business-rule rejection carrying a ``Message``/``error``, or an empty body (a bare
-    ``responseCode:0`` after stripping). Treat all of those as FAILURE — only a non-empty,
-    error-marker-free payload counts as a delete. Fail loud rather than flip the recovery
-    ledger and report PASS for a row that still exists.
+    business-rule rejection carrying a ``Message``/``error`` (a ``responseCode:0`` whose
+    non-empty message ``unwrap_response`` preserves), or an empty body (a bare
+    ``responseCode:0``). Treat fault/error-marker payloads as FAILURE; only an empty or
+    error-marker-free payload counts as a committed mutation. Fail loud rather than audit a
+    Sierra-rejected write as ``result="ok"`` (or flip the recovery ledger for a delete).
     """
     if isinstance(result, dict):
         for k in ("Message", "message", "error", "errors", "exceptionMessage", "ExceptionType"):
@@ -33,12 +35,12 @@ def _assert_delete_ack(result: Any, *, what: str) -> None:
             raise EndpointError(f"{what} reported success=false", raw=result)
         # An empty dict is Sierra's bare ``responseCode:0`` success (no body) — accept it.
         # A ``responseCode:0`` that still carries a business-rule *message* is surfaced by
-        # the loop above, because unwrap_response now PRESERVES a non-empty message rather
-        # than stripping it (#9); so a soft rejection no longer masquerades as an empty ack.
+        # the loop above, because unwrap_response PRESERVES a non-empty message rather than
+        # stripping it (#9); so a soft rejection no longer masquerades as an empty ack.
         return
     if result:  # truthy non-dict (e.g. an id or True) is a positive ack
         return
-    raise EndpointError(f"{what}: no response body — cannot confirm deletion", raw=result)
+    raise EndpointError(f"{what}: no response body — cannot confirm the mutation", raw=result)
 
 
 class SierraHttpClient:
@@ -278,32 +280,41 @@ class SierraHttpClient:
 
     def update_content_label(self, content_label_id: int, name: str) -> None:
         self._ensure_write("update_content_label")
-        self._call(
-            "/content-pages.aspx/UpdateContentLabel",
-            {
-                "siteId": self.site_id,
-                "agentSiteId": self._agent_site_id,
-                "contentLabelId": int(content_label_id),
-                "name": name,
-            },
+        _assert_mutation_ack(
+            self._call(
+                "/content-pages.aspx/UpdateContentLabel",
+                {
+                    "siteId": self.site_id,
+                    "agentSiteId": self._agent_site_id,
+                    "contentLabelId": int(content_label_id),
+                    "name": name,
+                },
+            ),
+            what="update_content_label",
         )
 
     def remove_content_label(self, content_label_id: int) -> None:
         self._ensure_write("remove_content_label")
-        self._call(
-            "/content-pages.aspx/RemoveContentLabel",
-            {"contentLabelId": int(content_label_id)},
+        _assert_mutation_ack(
+            self._call(
+                "/content-pages.aspx/RemoveContentLabel",
+                {"contentLabelId": int(content_label_id)},
+            ),
+            what="remove_content_label",
         )
 
     def save_html_widget(self, widget: dict) -> None:
         self._ensure_write("save_html_widget")
-        self._call(
-            "/shared-html-widgets.aspx/SaveHtmlWidget",
-            {
-                "widget": _json.dumps(widget),
-                "siteId": self.site_id,
-                "agentSiteId": self._agent_site_id,
-            },
+        _assert_mutation_ack(
+            self._call(
+                "/shared-html-widgets.aspx/SaveHtmlWidget",
+                {
+                    "widget": _json.dumps(widget),
+                    "siteId": self.site_id,
+                    "agentSiteId": self._agent_site_id,
+                },
+            ),
+            what="save_html_widget",
         )
 
     def save_content_page(
@@ -323,15 +334,19 @@ class SierraHttpClient:
                 "associations": associations or [],
             },
         )
+        _assert_mutation_ack(r, what="save_content_page")
         return r if isinstance(r, dict) else {}
 
     def update_page_component_title(
         self, component_link_id: int, title: str
     ) -> None:
         self._ensure_write("update_page_component_title")
-        self._call(
-            "/content-page-form.aspx/UpdatePageComponentTitle",
-            {"componentId": int(component_link_id), "componentTitle": title},
+        _assert_mutation_ack(
+            self._call(
+                "/content-page-form.aspx/UpdatePageComponentTitle",
+                {"componentId": int(component_link_id), "componentTitle": title},
+            ),
+            what="update_page_component_title",
         )
 
     def add_page_component_link(
@@ -364,32 +379,42 @@ class SierraHttpClient:
 
     def remove_page_component_link(self, component_link_id: int) -> None:
         self._ensure_write("remove_page_component_link")
-        self._call(
-            "/content-pages.aspx/RemovePageComponentLink",
-            {"componentId": int(component_link_id)},
+        _assert_mutation_ack(
+            self._call(
+                "/content-pages.aspx/RemovePageComponentLink",
+                {"componentId": int(component_link_id)},
+            ),
+            what="remove_page_component_link",
         )
 
     def add_page_content_label_link(
         self, page_id: int, content_label_id: int
     ) -> None:
         self._ensure_write("add_page_content_label_link")
-        self._call(
-            "/content-page-form.aspx/AddPageContentLabelLink",
-            {"pageId": int(page_id), "contentLabelId": int(content_label_id)},
+        _assert_mutation_ack(
+            self._call(
+                "/content-page-form.aspx/AddPageContentLabelLink",
+                {"pageId": int(page_id), "contentLabelId": int(content_label_id)},
+            ),
+            what="add_page_content_label_link",
         )
 
     def remove_page_content_label_link(
         self, page_id: int, content_label_id: int
     ) -> None:
         self._ensure_write("remove_page_content_label_link")
-        self._call(
-            "/content-pages.aspx/RemovePageContentLabelLink",
-            {"pageId": int(page_id), "contentLabelId": int(content_label_id)},
+        _assert_mutation_ack(
+            self._call(
+                "/content-pages.aspx/RemovePageContentLabelLink",
+                {"pageId": int(page_id), "contentLabelId": int(content_label_id)},
+            ),
+            what="remove_page_content_label_link",
         )
 
     def save_saved_search(self, record: dict) -> dict:
         self._ensure_write("save_saved_search")
         r = self._call("/lead-detail.aspx/SaveSearchRecord", record)
+        _assert_mutation_ack(r, what="save_saved_search")
         return r if isinstance(r, dict) else {}
 
     # ---- identity-locked deletes -------------------------------------
@@ -427,7 +452,7 @@ class SierraHttpClient:
             "/content-pages.aspx/DeleteContentPage",
             {"pageId": int(page_id)},
         )
-        _assert_delete_ack(ack, what=f"delete_content_page(id={page_id})")
+        _assert_mutation_ack(ack, what=f"delete_content_page(id={page_id})")
         return {"deleted": int(page_id), "reversible": False}
 
     def delete_saved_search(
@@ -463,5 +488,5 @@ class SierraHttpClient:
             "/saved-searches.aspx/DeleteSavedSearch",
             {"siteId": str(self.site_id), "savedSearchId": int(search_id)},
         )
-        _assert_delete_ack(ack, what=f"delete_saved_search(id={search_id})")
+        _assert_mutation_ack(ack, what=f"delete_saved_search(id={search_id})")
         return {"deleted": int(search_id), "reversible": True}

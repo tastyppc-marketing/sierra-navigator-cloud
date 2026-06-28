@@ -90,6 +90,24 @@ def test_delete_saved_search_accepts_positive_ack():
     }
 
 
+# ---- non-delete writes (re-audit #3 MEDIUM): same ack guards the write path ---- #
+
+def test_non_delete_write_raises_on_business_rule_rejection():
+    # A responseCode:0 + non-empty message is a soft rejection — the write must raise, not
+    # be discarded and audited as a committed result="ok".
+    c = _client({
+        "/content-pages.aspx/UpdateContentLabel":
+            env({"responseCode": 0, "message": "Label name already in use"}),
+    })
+    with pytest.raises(EndpointError):
+        c.update_content_label(55, "Dup Name")
+
+
+def test_non_delete_write_accepts_bare_responsecode_zero():
+    c = _client({"/content-pages.aspx/UpdateContentLabel": env({"responseCode": 0})})
+    c.update_content_label(55, "New Name")  # bare responseCode:0 success -> no raise
+
+
 def test_delete_saved_search_raises_on_business_rule_message():
     # A responseCode:0 that still carries a (now-preserved) business-rule message is a
     # soft rejection, not a delete — the SavedSearch+AgentsTeam coexistence rule class.
