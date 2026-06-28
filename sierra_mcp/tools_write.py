@@ -393,6 +393,12 @@ def _capturing_sink(conn, tenant: str, entity_type: str) -> tuple[Callable[[dict
     captured: dict = {}
 
     def sink(record: dict) -> int:
+        # Idempotent across a session-expiry retry: runtime.call_with_refresh re-runs the
+        # whole delete op, so without this guard the pre-delete snapshot would INSERT a
+        # second ledger row and orphan the first at "pending-delete" for an entity that was
+        # actually deleted (re-audit #3 LOW). Snapshot exactly once per row.
+        if "ledger_id" in captured:
+            return captured["ledger_id"]
         ledger_id = base(record)
         captured["ledger_id"] = ledger_id
         return ledger_id

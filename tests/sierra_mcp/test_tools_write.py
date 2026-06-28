@@ -562,3 +562,17 @@ def test_identity_abort_audited_aborted_not_rejected(ctx):
     assert ("confirm_deletions", "delete", "aborted") in triples
     # an abort is NOT a guard rejection — it must not land a "rejected" row
     assert ("confirm_deletions", "delete", "rejected") not in triples
+
+
+def test_capturing_sink_is_idempotent_across_retry(ctx):
+    # re-audit #3 LOW: runtime.call_with_refresh re-runs the whole delete op on a session-
+    # expiry signal, calling the SAME snapshot_sink again. Without idempotency that inserts a
+    # SECOND ledger row and orphans the first at "pending-delete" for an entity that WAS
+    # deleted. The sink must snapshot exactly once.
+    from sierra_mcp.tools_write import _capturing_sink
+    sink, captured = _capturing_sink(ctx.conn, "op", "content_page")
+    record = {"page": {"id": 900, "name": "Home"}}
+    first = sink(record)
+    second = sink(record)  # the retry re-invokes the sink
+    assert first == second
+    assert ctx.conn.execute("SELECT COUNT(*) FROM ledger").fetchone()[0] == 1  # one row only
