@@ -104,24 +104,29 @@ def mint_token(
     token = f"{prefix}_{uuid4().hex}"
     now = datetime.now(timezone.utc)
     expires = now + timedelta(seconds=ttl_seconds)
-    conn.execute(
-        """
-        INSERT INTO confirm_tokens (
-            token, tenant_id, tool, scope_required, payload_hash,
-            created_at, expires_at, used_at
-        ) VALUES (?,?,?,?,?,?,?,NULL)
-        """,
-        (
-            token,
-            tenant_id,
-            tool,
-            scope_required,
-            canonical_hash(payload),
-            now.isoformat(),
-            expires.isoformat(),
-        ),
-    )
-    conn.commit()
+    # Serialize through the shared lock like every other writer (audit_event /
+    # redeem_token / ledger_record). mint was the last raw execute+commit path:
+    # its bare commit() could fire mid-flight against another thread's open
+    # BEGIN IMMEDIATE on the single shared connection, corrupting that transaction
+    # under concurrency (#3). transaction() makes the INSERT atomic + serialized.
+    with transaction(conn):
+        conn.execute(
+            """
+            INSERT INTO confirm_tokens (
+                token, tenant_id, tool, scope_required, payload_hash,
+                created_at, expires_at, used_at
+            ) VALUES (?,?,?,?,?,?,?,NULL)
+            """,
+            (
+                token,
+                tenant_id,
+                tool,
+                scope_required,
+                canonical_hash(payload),
+                now.isoformat(),
+                expires.isoformat(),
+            ),
+        )
     return {
         "confirm_token": token,
         "expires_at": expires.isoformat(),
