@@ -2,53 +2,68 @@
 
 Target: Hostinger KVM4 `187.124.83.246`, access `ssh myvps` (key-based, root). Caddy 2.6.2
 **native systemd**, file config `/etc/caddy/Caddyfile`; Docker 29.1.3 + `docker compose` v2.37.1
-(no buildx; GHCR auth not yet configured → **first deploy builds on the box**). Container binds
-**`127.0.0.1:8080`** (free); Caddy reverse-proxies `sierra.tastyautomations.com` → it (DNS already live).
+(no buildx; GHCR auth not yet configured → **first deploy builds on the box**). The container binds
+**`127.0.0.1:8080`** (compose maps it host-loopback-only); Caddy reverse-proxies
+`sierra.tastyautomations.com` → it (DNS already live).
+
+## ⚠ Order matters — AUTH BEFORE PUBLIC EXPOSURE (#4)
+The server exposes delete-capable tools, so it must NEVER be publicly reachable without auth. Two
+guards make that automatic: (1) the container binds `0.0.0.0` inside, so it **refuses to boot**
+unless `AUTHKIT_DOMAIN` is set — no-auth is honored only on a loopback bind (`sierra_mcp/auth.py`);
+(2) this runbook adds the public Caddy route **only after** the auth-enforced container is confirmed
+healthy and confirmed to return **401 without a token**. Do the steps in order; there is no
+unauthenticated window.
 
 ## Credential-safety boundary (read first)
-- The container needs `SIERRA_SITE` / `SIERRA_USERNAME` / `SIERRA_PASSWORD`. **The operator populates
-  `SIERRA_PASSWORD`** on the box — the build process does NOT transfer the Sierra password. The deploy
-  brings the container up; full Sierra function begins once the operator adds the password.
-- `WORKOS_API_KEY` is **not needed at runtime** (JWKS validation only).
+- The container needs `SIERRA_SITE` / `SIERRA_USERNAME` / `SIERRA_PASSWORD`. **The operator
+  populates `SIERRA_PASSWORD`** on the box — the build process never transfers the Sierra password.
+- `WORKOS_API_KEY` is **not** needed at runtime (JWKS validation only).
 
-## 1. Stage the code on the box
+## 1. WorkOS prep — do FIRST (the container won't boot without it)
+In the WorkOS dashboard (Staging → later Production): enable **Dynamic Client Registration**, and
+copy your **AuthKit domain** (e.g. `https://<env>.authkit.app`) — it goes in the `.env` below.
+
+## 2. Stage the code on the box
 ```bash
 ssh myvps 'mkdir -p /root/sierra-mcp'
-# from the local repo root (rsync excludes via .gitignore-ish):
 rsync -az --delete --exclude '.git' --exclude '__pycache__' --exclude '*.db' --exclude '.env' \
   ./ myvps:/root/sierra-mcp/
 ```
-(or `git clone` if the box gets repo auth later.)
 
-## 2. Create the env file on the box (mode 600) — operator fills the password
+## 3. Create the env file on the box (mode 600) — AUTH-ENFORCED; operator fills the password
 ```bash
 ssh myvps 'umask 077; cat > /root/sierra-mcp/.env' <<'EOF'
 SIERRA_SITE=gardnergrouprealtors.com
 SIERRA_USERNAME=<operator-fills>
 SIERRA_PASSWORD=<operator-fills>
 MCP_PUBLIC_BASE_URL=https://sierra.tastyautomations.com
-# WorkOS (fill once AuthKit domain captured + DCR enabled):
-AUTHKIT_DOMAIN=
+# WorkOS auth — REQUIRED (the container refuses to boot without AUTHKIT_DOMAIN):
+AUTHKIT_DOMAIN=https://<your-env>.authkit.app
 WORKOS_CLIENT_ID=client_01KW5KZANVNA94SYQ209S75740
-# Until AUTHKIT_DOMAIN is set, opt into local no-auth so the container can boot:
-SIERRA_MCP_ALLOW_NO_AUTH=1
+# Only YOUR WorkOS subject(s) may use the server (email or sub, comma-separated):
+SIERRA_MCP_SUBJECT_ALLOWLIST=tastyppc@gmail.com
 EOF
 ssh myvps 'chmod 600 /root/sierra-mcp/.env'
 ```
+> Do NOT set `SIERRA_MCP_ALLOW_NO_AUTH` here — the container binds `0.0.0.0` and will refuse to start
+> with it (by design, #13). No-auth is only for a local `uvicorn --host 127.0.0.1` dev run.
 
-## 3. Build + start the container (localhost only)
+## 4. Build + start the container (auth-enforced, localhost-only) and PROVE auth is on
 ```bash
 ssh myvps 'cd /root/sierra-mcp && docker compose up -d --build'
-ssh myvps 'docker ps --filter name=sierra-mcp; curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8080/health'
-# expect: 200
+ssh myvps 'docker ps --filter name=sierra-mcp; docker logs --tail 20 sierra-mcp'
+ssh myvps 'curl -sS -o /dev/null -w "health:        %{http_code}\n" http://127.0.0.1:8080/health'  # expect 200
+ssh myvps 'curl -sS -o /dev/null -w "mcp (no token): %{http_code}\n" http://127.0.0.1:8080/mcp'     # expect 401
 ```
+**If `/mcp` returns anything other than 401, STOP** — auth is not enforced; do not expose it. (If
+`/health` itself 401s, the health route needs to be made auth-exempt — flag it before proceeding.)
 
-## 4. Caddy site block — ADDITIVE, with backup/validate/verify/rollback
+## 5. Caddy site block — ADDITIVE, with backup / validate / verify / rollback
 ```bash
-# 4a. BACK UP first (box convention: Caddyfile.bak-<note>)
+# 5a. BACK UP first (box convention: Caddyfile.bak-<note>)
 ssh myvps 'cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak-sierra'
 
-# 4b. Append the block (mirrors siblings exactly)
+# 5b. Append the block (mirrors siblings exactly)
 ssh myvps 'cat >> /etc/caddy/Caddyfile' <<'EOF'
 
 sierra.tastyautomations.com {
@@ -56,20 +71,20 @@ sierra.tastyautomations.com {
 }
 EOF
 
-# 4c. VALIDATE before reload — abort if this fails
+# 5c. VALIDATE before reload — abort if this fails
 ssh myvps 'caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile'
 
-# 4d. Reload (graceful; does not drop :80/:443 or other sites)
+# 5d. Reload (graceful; does not drop :80/:443 or other sites)
 ssh myvps 'systemctl reload caddy'
 
-# 4e. VERIFY siblings still respond AND sierra now serves (expect 200/301/401/308, NOT connection errors)
+# 5e. VERIFY siblings still respond AND sierra now serves (expect 200/301/401/308, NOT connection errors)
 ssh myvps 'for h in mcp gads analytics control sierra; do printf "%s " $h; curl -sS -o /dev/null -w "%{http_code}\n" https://$h.tastyautomations.com/ ; done'
 ssh myvps 'systemctl is-active caddy; journalctl -u caddy -n 20 --no-pager | tail'
 
-# 4f. SERVER smoke over HTTPS (through Caddy):
-curl -sS -o /dev/null -w "health: %{http_code}\n" https://sierra.tastyautomations.com/health          # expect 200
-curl -sS https://sierra.tastyautomations.com/.well-known/oauth-protected-resource | head -c 400; echo  # expect JSON (auth-enforced mode)
-curl -sS -o /dev/null -w "mcp (no token): %{http_code}\n" https://sierra.tastyautomations.com/mcp/      # expect 401 once auth is enforced (or 200/406 in no-auth dev mode)
+# 5f. SERVER smoke over HTTPS (through Caddy):
+curl -sS -o /dev/null -w "health:        %{http_code}\n" https://sierra.tastyautomations.com/health        # expect 200
+curl -sS https://sierra.tastyautomations.com/.well-known/oauth-protected-resource | head -c 400; echo      # expect JSON
+curl -sS -o /dev/null -w "mcp (no token): %{http_code}\n" https://sierra.tastyautomations.com/mcp          # expect 401
 ```
 
 ### ROLLBACK (run on ANY doubt — sibling not responding, validate fail, cert error)
@@ -77,16 +92,33 @@ curl -sS -o /dev/null -w "mcp (no token): %{http_code}\n" https://sierra.tastyau
 ssh myvps 'cp -a /etc/caddy/Caddyfile.bak-sierra /etc/caddy/Caddyfile && systemctl reload caddy'
 ```
 If sibling health can't be confirmed after reload, roll back and leave the final reload for the
-operator (note it in the handoff). Never disturb openclaw-gateway / XRDP / the other sites.
+operator. Never disturb openclaw-gateway / XRDP / the other sites.
 
-## 5. Operator finishing steps (documented, not automated)
-1. Fill `SIERRA_USERNAME` + `SIERRA_PASSWORD` in `/root/sierra-mcp/.env`, then
-   `ssh myvps 'cd /root/sierra-mcp && docker compose up -d'` (recreate with creds).
-2. WorkOS: enable **Dynamic Client Registration**; copy the **AuthKit domain** into `AUTHKIT_DOMAIN`,
-   remove `SIERRA_MCP_ALLOW_NO_AUTH`, recreate the container (now auth-enforced).
-3. Add the MCP connector in Claude Desktop / ChatGPT → `https://sierra.tastyautomations.com/mcp/`
-   and approve the WorkOS sign-in.
+## 6. Connect the chat clients (see CONNECTORS.md)
+Add the connector `https://sierra.tastyautomations.com/mcp` in Claude Desktop / ChatGPT and approve
+the WorkOS sign-in. Only subjects in `SIERRA_MCP_SUBJECT_ALLOWLIST` are authorized.
 
 ## Phase 2c (later)
 CI builds → GHCR → `ssh myvps 'cd /root/sierra-mcp && docker compose pull && up -d'`. At that point
-drop `build: .` from compose and add `docker login ghcr.io` on the box (deploy token).
+drop `build: .` from compose and add `docker login ghcr.io` on the box (deploy token). Harden the
+workflow (SHA-pinned actions + a GitHub Environment approval gate + a forced-command deploy key, #15)
+before enabling auto-deploy.
+```
+
+Let me write this. Then commit W1-T7 (DEPLOY.md only — no code, no tests). That completes Wave 1.
+
+Actually — DEPLOY.md is a doc; no test. The suite is unaffected. Let me write it + commit.
+
+Wait — env.example also has SIERRA_MCP_ALLOW_NO_AUTH and should mention SIERRA_MCP_SUBJECT_ALLOWLIST + SIERRA_MCP_BIND_HOST. Should I update env.example too? It's referenced by the deploy. The W1-T7 task is DEPLOY.md, but env.example consistency matters (it lists the env vars). Let me update env.example to add SIERRA_MCP_SUBJECT_ALLOWLIST + SIERRA_MCP_BIND_HOST + note the no-auth-loopback rule. That's part of the auth/deploy hardening (touches the deploy story). Let me include it in W1-T7 (it's a doc/config file, no conflict).
+
+Actually, env.example was touched by W1-T1 (I added SIERRA_MCP_DB_PATH etc.). Let me add the new auth vars to env.example too. Let me do it as part of W1-T7.
+
+Let me write DEPLOY.md, then update env.example, then commit W1-T7.
+
+Let me write DEPLOY.md first.Writing the reordered `DEPLOY.md`.
+
+Now updating `env.example` to add the new auth vars (subject allowlist, bind host) — then committing W1-T7 to close Wave 1.
+
+
+<invoke name="Read">
+<parameter name="file_path">C:\Dev\sierra-navigator-cloud\env.example
