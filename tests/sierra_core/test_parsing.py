@@ -34,3 +34,21 @@ def test_coerce_pyish_single_quoted():
 def test_unwrap_falls_back_to_pyish_coerce():
     body = json.dumps({"d": "{'responseCode':0,'contentLabelId':19778}"})
     assert unwrap_response(body) == {"contentLabelId": 19778}
+
+
+# --------------------------------------------------------------------------- #
+# W1-T3 (#9): ASP.NET exception envelopes raise; ordinary dicts still return
+# --------------------------------------------------------------------------- #
+
+def test_unwrap_raises_on_aspnet_exception_envelope():
+    with pytest.raises(EndpointError):
+        unwrap_response(_envelope({"Message": "Object reference not set", "StackTrace": "at X.Y()"}))
+    with pytest.raises(EndpointError):
+        unwrap_response(_envelope({"Message": "boom", "ExceptionType": "System.NullReferenceException"}))
+
+
+def test_unwrap_returns_ordinary_dict_without_error_markers():
+    # No responseCode and no exception markers → returned unchanged (conservative).
+    assert unwrap_response(_envelope({"id": 1, "name": "ok"})) == {"id": 1, "name": "ok"}
+    # 'Message' alone (no StackTrace/ExceptionType) is NOT treated as an error.
+    assert unwrap_response(_envelope({"Message": "hi", "id": 2})) == {"Message": "hi", "id": 2}

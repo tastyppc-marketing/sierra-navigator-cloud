@@ -44,4 +44,10 @@ def unwrap_response(text: str) -> Any:
                 return d.get("Data")
             return {k: v for k, v in d.items()
                     if k not in ("responseCode", "ResponseCode", "Data", "Message", "message")}
+        # No responseCode contract. An ASP.NET page-method exception serializes (even
+        # at HTTP 200) as {"Message": ..., "StackTrace"|"ExceptionType": ...}. Raise
+        # instead of returning it as if it were valid data (#9). Conservative: only the
+        # unambiguous exception envelope triggers this; ordinary data dicts return below.
+        if "Message" in d and ("StackTrace" in d or "ExceptionType" in d):
+            raise EndpointError(f"server error: {d.get('Message')}", raw=d)
     return d

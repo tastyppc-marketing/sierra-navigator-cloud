@@ -3,6 +3,8 @@ import json
 from typing import Protocol
 import httpx
 
+from sierra_core.errors import EndpointError
+
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 SIERRA_HEADERS = {
@@ -26,6 +28,11 @@ class HttpxTransport:
 
     def post_json(self, path: str, body: dict) -> str:
         r = self._client.post(path, content=json.dumps(body))
+        # Surface HTTP-level failures instead of swallowing them as "data" (#9).
+        # 3xx is NOT is_error, so a 302 session-expiry redirect still flows through
+        # as a body for the logout detector; only 4xx/5xx raise here.
+        if r.is_error:
+            raise EndpointError(f"HTTP {r.status_code}", raw=(r.text or "")[:300])
         return r.text
 
     def close(self) -> None:
