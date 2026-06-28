@@ -14,28 +14,40 @@ def test_app_is_asgi_callable():
     assert list(params) == ["scope", "receive", "send"]
 
 
-def test_registered_tools_equal_read_write_delete_union():
-    # The registered set must EQUAL read + write + delete exactly. Adding (or
-    # dropping) any tool breaks this test, keeping the layer's contract locked.
+def test_registered_tools_equal_read_write_delete_generic_union():
+    # The registered set must EQUAL read + write + delete + generic exactly. Adding
+    # (or dropping) any tool breaks this test, keeping the layer's contract locked.
     tools = asyncio.run(server.mcp.list_tools())
     names = {t.name for t in tools}
     expected = (
         set(server.READ_TOOL_NAMES)
         | set(server.WRITE_TOOL_NAMES)
         | set(server.DELETE_TOOL_NAMES)
+        | set(server.GENERIC_TOOL_NAMES)
     )
     assert names == expected
     assert len(server.READ_TOOL_NAMES) == 10
     assert len(server.WRITE_TOOL_NAMES) == 6
     assert len(server.DELETE_TOOL_NAMES) == 2
-    assert len(names) == 18
-    # the three sets must be disjoint (no tool double-counted)
-    assert not (set(server.READ_TOOL_NAMES) & set(server.WRITE_TOOL_NAMES))
-    assert not (set(server.WRITE_TOOL_NAMES) & set(server.DELETE_TOOL_NAMES))
+    assert len(server.GENERIC_TOOL_NAMES) == 1
+    assert len(names) == 19
+    # the four name groups must be pairwise disjoint (no tool double-counted)
+    flat = [
+        n
+        for grp in (
+            server.READ_TOOL_NAMES,
+            server.WRITE_TOOL_NAMES,
+            server.DELETE_TOOL_NAMES,
+            server.GENERIC_TOOL_NAMES,
+        )
+        for n in grp
+    ]
+    assert len(flat) == len(set(flat)) == 19
     # spot-check representative tools
     assert {"list_saved_searches", "get_page"} <= names          # read
     assert "create_content_label" in names                       # write
     assert {"propose_deletions", "confirm_deletions"} <= names   # delete
+    assert "sierra_call" in names                                 # generic
 
 
 def test_resources_registered():

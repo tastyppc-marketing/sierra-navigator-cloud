@@ -37,3 +37,22 @@ The guards correctly **enforce** every rule, and successes + identity-lock
 "someone tried to replay a delete token"), wrap the guard calls (cleanest: a
 single chokepoint in `server.py`'s tool wrappers) to write a `result="refused"`
 audit row before re-raising. Enforcement is already correct; this is logging only.
+
+(`sierra_call`'s own refusals — an un-catalogued path, or a locked-destructive
+op — follow the same pattern: they raise `ValueError` before any Sierra contact
+and are not yet audited.)
+
+## Tier-2 generic caller (`sierra_call`)
+
+`sierra_mcp/tools_generic.py` exposes `sierra_call(path, body, confirm_token)` —
+a guarded escape hatch over the whole 642-endpoint catalogue, so a new Sierra op
+is reachable without new code. Fences: (1) **allowlist** = `catalogue.endpoint_paths()`;
+(2) **classification** by method prefix → scope (Get/List/Find/Check/Load/Validate/
+Search/Count = read; Delete* = delete; else write); (3) **locked-destructive
+refusal** for `DeleteContentPage`, `DeleteSavedSearch`, and any `Duplicate*`
+(routed to the identity-locked Tier-1 `propose_deletions`/`confirm_deletions`);
+(4) writes/deletes reuse the Tier-1 `guarded_write` (dry-run→confirm + audit +
+caps). It rests on the one intentional `sierra_core` addition,
+`SierraHttpClient.call(path, body, *, write=False)`. Bodies are posted **verbatim**
+(no `siteId` coercion — the caller owns the exact field shapes); the result of a
+generic call is the **raw unwrapped payload**, not a shaped value.

@@ -1,0 +1,89 @@
+name: Build & Deploy
+
+# Auto-propagation (Phase 2c): a push to main builds the image, pushes it to GHCR,
+# and redeploys the VPS container — one merge upgrades the live MCP for every client.
+#
+# REQUIRED SECRETS (set with `gh secret set <NAME> -R tastyppc-marketing/sierra-navigator-cloud`):
+#   VPS_HOST        - VPS hostname/IP (187.124.83.246)
+#   VPS_USER        - ssh user (root)
+#   VPS_SSH_KEY     - a DEDICATED deploy private key (add its public key to the box's
+#                     authorized_keys; do NOT reuse a personal key)
+#   VPS_SSH_PORT    - optional, omit for 22
+#   VPS_APP_DIR     - dir on the box holding docker-compose.yml + .env (/root/sierra-mcp)
+#   GHCR_PULL_TOKEN - a PAT with read:packages so the box can pull the PRIVATE image
+#                     (the runner's GITHUB_TOKEN is not available on the box)
+#
+# Until those secrets exist this workflow will fail at the deploy step — that's expected;
+# the first deploy is done manually per DEPLOY.md. Enable this once the box is set up.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
+
+  build-deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT || 22 }}
+          script: |
+            set -e
+            cd ${{ secrets.VPS_APP_DIR }}
+            echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker compose pull
+            docker compose up -d
+            docker image prune -f

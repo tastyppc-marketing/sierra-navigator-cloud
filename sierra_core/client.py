@@ -45,6 +45,21 @@ class SierraHttpClient:
     def _call(self, path: str, body: dict | None = None) -> Any:
         return unwrap_response(self._t.post_json(path, body or {}))
 
+    # ---- generic catalogued-endpoint caller --------------------------
+
+    def call(self, path: str, body: dict | None = None, *, write: bool = False) -> Any:
+        """Generic catalogued-endpoint call.
+
+        Posts ``body`` verbatim to ``path`` and unwraps the response, exactly like
+        the typed methods. ``write=True`` routes the call through the
+        ``allow_write`` gate first (so a read-only client refuses it). The Tier-2
+        ``sierra_call`` MCP tool sits on top of this; allow-listing, classification,
+        and the destructive-op refusals are enforced there, not here.
+        """
+        if write:
+            self._ensure_write("call")
+        return self._call(path, body or {})
+
     # ---- reads -------------------------------------------------------
 
     def get_page(self, page_id: int | str) -> dict:

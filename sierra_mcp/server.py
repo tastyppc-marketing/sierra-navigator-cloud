@@ -14,7 +14,7 @@ import json
 from fastmcp import FastMCP
 from starlette.responses import JSONResponse
 
-from sierra_mcp import context, tools_read, tools_write
+from sierra_mcp import context, tools_generic, tools_read, tools_write
 from sierra_mcp.auth import build_auth
 from sierra_mcp.catalogue import load_catalogue, verified_endpoints_markdown
 
@@ -349,6 +349,42 @@ def confirm_deletions(confirm_token: str, entity_type: str, confirmations: list[
 DELETE_TOOL_NAMES: tuple[str, ...] = (
     "propose_deletions",
     "confirm_deletions",
+)
+
+
+# --------------------------------------------------------------------------
+# Tier-2 generic caller (the guarded escape hatch over the whole catalogue)
+# --------------------------------------------------------------------------
+
+@mcp.tool
+def sierra_call(path: str, body: dict | None = None, confirm_token: str | None = None) -> dict:
+    """Generic caller for ANY catalogued Sierra endpoint (Tier-2 escape hatch).
+
+    Use this only when no dedicated tool exists for what you need. ``path`` MUST be
+    one of the catalogued endpoints — read the ``resource://sierra/endpoints``
+    resource for valid paths, and ``resource://sierra/endpoints/verified`` for the
+    documented request bodies. The ``body`` is sent to Sierra VERBATIM (you are
+    responsible for the exact field shapes, including the per-endpoint string-vs-int
+    ``siteId`` quirk).
+
+    Scope + behaviour are inferred from the endpoint's method name:
+    - READ (Get/List/Find/Check/Load/Validate/Search/Count*) executes immediately
+      and returns ``{"mode": "called", "path", "result"}``.
+    - WRITE / DELETE (Add/Update/Save/Remove/Set/… or Delete*) is a TWO-STEP
+      guarded mutation: call once WITHOUT ``confirm_token`` to PREVIEW (mints a
+      token, sends nothing), then call again WITH that token to COMMIT. Same audit
+      trail + volume caps as the dedicated write tools.
+
+    REFUSED here: entity deletes (``DeleteContentPage`` / ``DeleteSavedSearch``) and
+    any ``Duplicate*`` op — those bypass the identity lock, so use
+    ``propose_deletions`` / ``confirm_deletions`` instead. An un-catalogued path is
+    rejected.
+    """
+    return tools_generic.sierra_call(path, body, confirm_token=confirm_token)
+
+
+GENERIC_TOOL_NAMES: tuple[str, ...] = (
+    "sierra_call",
 )
 
 
