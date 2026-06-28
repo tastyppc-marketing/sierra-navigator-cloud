@@ -2,6 +2,7 @@
 ledger round-trip, and the delete snapshot_sink."""
 import json
 import sqlite3
+import threading
 
 import pytest
 
@@ -273,3 +274,82 @@ def test_snapshot_sink_raises_on_broken_conn():
     c.close()  # break the connection
     with pytest.raises(sqlite3.Error):
         sink({"page": {"id": 1, "name": "X"}})
+
+
+# --------------------------------------------------------------------------- #
+# W1-T1: thread-safe DB (#3), broadened redaction of before/after/snapshot (#14),
+# audit_reject (#8a)
+# --------------------------------------------------------------------------- #
+
+def test_connect_sets_wal_and_busy_timeout(tmp_path):
+    c = audit.connect(str(tmp_path / "x.db"))
+    try:
+        assert c.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert int(c.execute("PRAGMA busy_timeout").fetchone()[0]) == 5000
+    finally:
+        c.close()
+
+
+def test_audit_event_redacts_before_and_after(conn):
+    audit.audit_event(
+        conn, tenant_id="op", actor="a", tool="t", action="x", result="ok",
+        before_json={"name": "Home", "authorization": "Bearer abc", "cookie": "s=1"},
+        after_json={"password": "p", "session": "sess", "title": "T"},
+    )
+    row = conn.execute(
+        "SELECT before_json, after_json FROM audit_log ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    before, after = json.loads(row["before_json"]), json.loads(row["after_json"])
+    assert before["name"] == "Home"                       # non-secret preserved
+    assert before["authorization"] == "***" and before["cookie"] == "***"
+    assert after["password"] == "***" and after["session"] == "***"
+    assert after["title"] == "T"
+
+
+def test_ledger_payload_snapshot_redacts_secret_named_keys(conn):
+    audit.ledger_record(
+        conn, tenant_id="op", entity_type="widget", action="deleted",
+        payload_snapshot={"id": 1, "name": "W", "apiKey": "xyz", "bearer": "b"},
+    )
+    snap = json.loads(
+        conn.execute("SELECT payload_snapshot FROM ledger ORDER BY id DESC LIMIT 1").fetchone()[0]
+    )
+    assert snap["id"] == 1 and snap["name"] == "W"
+    assert snap["apiKey"] == "***" and snap["bearer"] == "***"
+
+
+def test_audit_reject_writes_a_rejected_row(conn):
+    rid = audit.audit_reject(
+        conn, tenant_id="op", actor="a@b.com", tool="sierra_call", action="call",
+        scope="delete", error="refused: locked-destructive",
+        args_redacted={"path": "/content-pages.aspx/DeleteContentPages", "password": "p"},
+        endpoint="/content-pages.aspx/DeleteContentPages", entity_type="content_page",
+    )
+    row = conn.execute(
+        "SELECT result, error, tool, scope, args_redacted FROM audit_log WHERE id = ?", (rid,)
+    ).fetchone()
+    assert row["result"] == "rejected"
+    assert "refused" in row["error"] and row["scope"] == "delete"
+    assert json.loads(row["args_redacted"])["password"] == "***"
+
+
+def test_concurrent_writes_on_shared_conn_no_programmingerror(conn):
+    """The #3 fix: one shared conn (check_same_thread=False) + _DB_LOCK serializes
+    writes across FastMCP worker threads. Pre-fix this raised sqlite3.ProgrammingError."""
+    errors: list[Exception] = []
+
+    def worker(n: int) -> None:
+        try:
+            for _ in range(20):
+                audit.audit_event(conn, tenant_id="op", actor=f"t{n}", tool="x",
+                                  action="a", result="ok")
+        except Exception as e:  # noqa: BLE001 - capturing for the assertion
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [], f"concurrent audit raised: {errors!r}"
+    assert conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == 8 * 20

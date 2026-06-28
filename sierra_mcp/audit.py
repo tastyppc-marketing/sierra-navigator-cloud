@@ -31,6 +31,8 @@ import json
 import os
 import re
 import sqlite3
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -41,7 +43,10 @@ _DB_PATH_ENV = "SIERRA_MCP_DB_PATH"
 
 # Keys whose values must never be persisted into the audit trail. Matched as a
 # substring, case-insensitively, against each key name at any nesting depth.
-_SECRET_KEY_RE = re.compile(r"password|secret|token|key", re.IGNORECASE)
+_SECRET_KEY_RE = re.compile(
+    r"password|secret|token|key|authorization|cookie|bearer|session|jwt|api_key|auth",
+    re.IGNORECASE,
+)
 _REDACTED = "***"
 
 
@@ -52,6 +57,41 @@ _REDACTED = "***"
 def now_iso() -> str:
     """Current instant as a tz-aware ISO-8601 UTC string (sortable)."""
     return datetime.now(timezone.utc).isoformat()
+
+
+# --------------------------------------------------------------------------- #
+# concurrency — one shared connection, serialized
+# --------------------------------------------------------------------------- #
+
+# The whole process shares ONE sqlite connection (opened check_same_thread=False);
+# FastMCP dispatches sync tools on a worker-thread pool, so every statement is
+# serialized through this re-entrant lock. WAL + busy_timeout (see connect) handle
+# any cross-process contention.
+_DB_LOCK = threading.RLock()
+
+
+@contextmanager
+def transaction(conn: sqlite3.Connection):
+    """Run a compound critical section atomically on the shared connection.
+
+    Holds the process-wide lock for the whole block, opens ``BEGIN IMMEDIATE``,
+    and commits on success / rolls back on error. Re-entrant: if a transaction is
+    already open on ``conn`` (an outer ``transaction``), this neither re-BEGINs nor
+    commits — the outermost block owns the commit.
+    """
+    with _DB_LOCK:
+        began = not conn.in_transaction
+        if began:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+        except BaseException:
+            if began:
+                conn.rollback()
+            raise
+        else:
+            if began:
+                conn.commit()
 
 
 # --------------------------------------------------------------------------- #
@@ -72,8 +112,13 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
         parent = os.path.dirname(os.path.abspath(db_path))
         if parent:
             os.makedirs(parent, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # WAL + a busy timeout so the single shared connection tolerates concurrent
+    # access from FastMCP's worker threads (serialized by _DB_LOCK) without
+    # SQLITE_BUSY. (No-op/harmless on :memory:.)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     init_schema(conn)
     return conn
 
@@ -251,37 +296,75 @@ def audit_event(
     are JSON-encoded) or pre-serialised strings (stored as-is). ``args_redacted``
     is additionally scrubbed of secret-ish keys before storage.
     """
-    cur = conn.execute(
-        """
-        INSERT INTO audit_log (
-            ts, tenant_id, actor, tool, endpoint, entity_type, entity_id,
-            title_snapshot, action, scope, confirm_token, args_redacted,
-            before_json, after_json, reversible, result, error, request_id
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            now_iso(),
-            tenant_id,
-            actor,
-            tool,
-            endpoint,
-            entity_type,
-            _str_or_none(entity_id),
-            title_snapshot,
-            action,
-            scope,
-            confirm_token,
-            _as_json(_redact(args_redacted)) if args_redacted is not None else None,
-            _as_json(before_json),
-            _as_json(after_json),
-            _bool_int(reversible),
-            result,
-            error,
-            request_id,
-        ),
+    with transaction(conn):
+        cur = conn.execute(
+            """
+            INSERT INTO audit_log (
+                ts, tenant_id, actor, tool, endpoint, entity_type, entity_id,
+                title_snapshot, action, scope, confirm_token, args_redacted,
+                before_json, after_json, reversible, result, error, request_id
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                now_iso(),
+                tenant_id,
+                actor,
+                tool,
+                endpoint,
+                entity_type,
+                _str_or_none(entity_id),
+                title_snapshot,
+                action,
+                scope,
+                confirm_token,
+                _as_json(_redact(args_redacted)) if args_redacted is not None else None,
+                _as_json(_redact(before_json)),
+                _as_json(_redact(after_json)),
+                _bool_int(reversible),
+                result,
+                error,
+                request_id,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def audit_reject(
+    conn: sqlite3.Connection,
+    *,
+    tenant_id: str,
+    actor: str,
+    tool: str,
+    action: str,
+    scope: str | None = None,
+    error: str | None = None,
+    args_redacted: Any = None,
+    endpoint: str | None = None,
+    entity_type: str | None = None,
+    entity_id: Any = None,
+    confirm_token: str | None = None,
+) -> int:
+    """Append one ``result="rejected"`` audit row for a guard REJECTION.
+
+    Records refusals that happen BEFORE any Sierra contact — bad scope, replayed/
+    expired/tampered confirm token, volume-cap trip, locked-destructive refusal —
+    so the guardrails can't be probed invisibly. Callers audit, then re-raise.
+    """
+    return audit_event(
+        conn,
+        tenant_id=tenant_id,
+        actor=actor,
+        tool=tool,
+        action=action,
+        result="rejected",
+        scope=scope,
+        endpoint=endpoint,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        confirm_token=confirm_token,
+        args_redacted=args_redacted,
+        error=error,
     )
-    conn.commit()
-    return int(cur.lastrowid)
 
 
 # --------------------------------------------------------------------------- #
@@ -302,28 +385,28 @@ def ledger_record(
     authorization: str | None = None,
 ) -> int:
     """Append one ``ledger`` row (``created_at=now``); return its ``id``."""
-    cur = conn.execute(
-        """
-        INSERT INTO ledger (
-            tenant_id, entity_type, entity_id, title_snapshot, action,
-            payload_snapshot, reversible, cleanup_status, authorization, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            tenant_id,
-            entity_type,
-            _str_or_none(entity_id),
-            title_snapshot,
-            action,
-            _as_json(payload_snapshot),
-            _bool_int(reversible),
-            cleanup_status,
-            authorization,
-            now_iso(),
-        ),
-    )
-    conn.commit()
-    return int(cur.lastrowid)
+    with transaction(conn):
+        cur = conn.execute(
+            """
+            INSERT INTO ledger (
+                tenant_id, entity_type, entity_id, title_snapshot, action,
+                payload_snapshot, reversible, cleanup_status, authorization, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                tenant_id,
+                entity_type,
+                _str_or_none(entity_id),
+                title_snapshot,
+                action,
+                _as_json(_redact(payload_snapshot)),
+                _bool_int(reversible),
+                cleanup_status,
+                authorization,
+                now_iso(),
+            ),
+        )
+        return int(cur.lastrowid)
 
 
 def ledger_mark_cleanup(
@@ -338,17 +421,17 @@ def ledger_mark_cleanup(
     When ``deleted=True`` also stamp ``deleted_at=now`` to record that the
     underlying entity has actually been removed.
     """
-    if deleted:
-        conn.execute(
-            "UPDATE ledger SET cleanup_status = ?, deleted_at = ? WHERE id = ?",
-            (cleanup_status, now_iso(), int(ledger_id)),
-        )
-    else:
-        conn.execute(
-            "UPDATE ledger SET cleanup_status = ? WHERE id = ?",
-            (cleanup_status, int(ledger_id)),
-        )
-    conn.commit()
+    with transaction(conn):
+        if deleted:
+            conn.execute(
+                "UPDATE ledger SET cleanup_status = ?, deleted_at = ? WHERE id = ?",
+                (cleanup_status, now_iso(), int(ledger_id)),
+            )
+        else:
+            conn.execute(
+                "UPDATE ledger SET cleanup_status = ? WHERE id = ?",
+                (cleanup_status, int(ledger_id)),
+            )
 
 
 def make_snapshot_sink(
