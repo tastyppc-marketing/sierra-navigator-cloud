@@ -1,0 +1,13 @@
+# Sierra Navigator Cloud — MCP service behind the VPS Caddy.
+# First deploy builds on the box (the VPS has no buildx; GHCR auth not yet set).
+# Phase 2c flips this to image-pull (docker compose pull) once CI pushes to GHCR.
+services:
+  sierra-mcp:
+    build: .
+    image: ghcr.io/tastyppc-marketing/sierra-navigator-cloud:latest
+    container_name: sierra-mcp
+    restart: unless-stopped
+    env_file:
+      - .env                       # /root/sierra-mcp/.env on the box (mode 600), git-ignored
+    ports:
+      - "127.0.0.1:8080:8080"      # localhost only; Caddy reverse-proxies sierra.tastyautomations.com → here
