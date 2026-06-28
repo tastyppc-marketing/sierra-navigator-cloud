@@ -1,0 +1,29 @@
+# Secrets & credentials — NEVER commit
+.env
+**/*.env
+!env.example
+creds_*.json
+*.creds
+secrets/
+
+# Runtime data (SQLite audit/ledger, session caches)
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+.oauth-store.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

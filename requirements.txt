@@ -1,0 +1,6 @@
+# sierra_core runtime — the only third-party dep it imports
+httpx>=0.28
+
+# MCP server stack (FastMCP v3 bundles mcp, starlette, uvicorn, authlib, joserfc)
+fastmcp==3.4.2
+uvicorn[standard]>=0.35

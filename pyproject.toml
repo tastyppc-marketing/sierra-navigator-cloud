@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# repo uses a flat layout (sierra_core/ and sierra_mcp/ at root); make them importable
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
