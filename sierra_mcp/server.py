@@ -46,6 +46,18 @@ mcp = FastMCP(
 runtime = context.get_runtime()
 
 
+def _guarded_read(tool: str, fn):
+    """Enforce per-identity access on a Tier-1 read, then run it.
+
+    Every read goes through ``context.authorize`` (subject allowlist + ``read`` scope,
+    auditing any denial) BEFORE hitting Sierra — closing New-3, where the read tools
+    called ``runtime.read`` directly and so skipped the allowlist that writes/deletes and
+    the ``sierra_call`` read path already enforce.
+    """
+    context.authorize(context.get_conn(), tool=tool, action="read", scope="read")
+    return runtime.read(fn)
+
+
 # --------------------------------------------------------------------------
 # Tier-1 read tools (one per sierra_mcp.tools_read shaper)
 # --------------------------------------------------------------------------
@@ -57,7 +69,7 @@ def get_page(page_id: int) -> dict:
     Returns ``{"record": {...}}`` with the page's full fields (name, url, status,
     components, ...). Use ``list_content_pages`` first to discover ids.
     """
-    return runtime.read(lambda c: tools_read.get_page(c, page_id=page_id))
+    return _guarded_read("get_page", lambda c: tools_read.get_page(c, page_id=page_id))
 
 
 @mcp.tool
@@ -78,7 +90,8 @@ def list_content_pages(
     ``total`` / ``has_more`` when Sierra reports them; each row carries the page id +
     metadata. ``page_size`` defaults to 500 (the Sierra server-side cap).
     """
-    return runtime.read(
+    return _guarded_read(
+        "list_content_pages",
         lambda c: tools_read.list_content_pages(
             c,
             sort_by=sort_by,
@@ -107,7 +120,8 @@ def list_saved_searches(
     ``search_term`` matches the saved-search name. Returns
     ``{"rows": [...], "count": N}`` (rows include the saved-search id + name).
     """
-    return runtime.read(
+    return _guarded_read(
+        "list_saved_searches",
         lambda c: tools_read.list_saved_searches(
             c,
             sort_by=sort_by,
@@ -127,7 +141,7 @@ def get_saved_search(search_id: int) -> dict:
     Returns ``{"record": {...}}`` with the search's name and full filter criteria.
     Discover ids via ``list_saved_searches``.
     """
-    return runtime.read(lambda c: tools_read.get_saved_search(c, search_id=search_id))
+    return _guarded_read("get_saved_search", lambda c: tools_read.get_saved_search(c, search_id=search_id))
 
 
 @mcp.tool
@@ -144,7 +158,8 @@ def list_html_widgets(
     ``widget_type`` -1 = all (1 = component, 4 = code). ``search_term`` matches the
     widget title. Returns ``{"rows": [...], "count": N}``.
     """
-    return runtime.read(
+    return _guarded_read(
+        "list_html_widgets",
         lambda c: tools_read.list_html_widgets(
             c,
             sort_by=sort_by,
@@ -164,7 +179,7 @@ def get_widget(widget_id: int) -> dict:
     Returns ``{"record": {...}}`` including the widget's title, type, and HTML/JS
     body. Discover ids via ``list_html_widgets``.
     """
-    return runtime.read(lambda c: tools_read.get_widget(c, widget_id=widget_id))
+    return _guarded_read("get_widget", lambda c: tools_read.get_widget(c, widget_id=widget_id))
 
 
 @mcp.tool
@@ -185,7 +200,8 @@ def list_blog_posts(
     ``total`` / ``has_more`` when Sierra reports them. ``page_size`` defaults to 50
     (the Sierra blog-manager page cap).
     """
-    return runtime.read(
+    return _guarded_read(
+        "list_blog_posts",
         lambda c: tools_read.list_blog_posts(
             c,
             sort_by=sort_by,
@@ -207,7 +223,7 @@ def get_blog_post(post_id: int) -> dict:
     Returns ``{"record": {...}}`` with the post title, body, and metadata.
     Discover ids via ``list_blog_posts``.
     """
-    return runtime.read(lambda c: tools_read.get_blog_post(c, post_id=post_id))
+    return _guarded_read("get_blog_post", lambda c: tools_read.get_blog_post(c, post_id=post_id))
 
 
 @mcp.tool
@@ -217,7 +233,7 @@ def get_filters() -> dict:
     Returns ``{"sections": [...], "labels": [...]}`` — the section and content-label
     options used to filter ``list_content_pages``.
     """
-    return runtime.read(lambda c: tools_read.get_filters(c))
+    return _guarded_read("get_filters", lambda c: tools_read.get_filters(c))
 
 
 @mcp.tool
@@ -226,10 +242,11 @@ def list_content_labels(sort_by: int = 1, sort_order: int = 0) -> dict:
 
     Returns ``{"rows": [...], "count": N}`` with each label's id + name.
     """
-    return runtime.read(
+    return _guarded_read(
+        "list_content_labels",
         lambda c: tools_read.list_content_labels(
             c, sort_by=sort_by, sort_order=sort_order
-        )
+        ),
     )
 
 

@@ -21,7 +21,6 @@ from typing import Any
 
 from sierra_mcp import audit, context
 from sierra_mcp.catalogue import endpoint_paths
-from sierra_mcp.guards import require_scope
 from sierra_mcp.tools_write import guarded_write
 
 # FAIL-CLOSED default-deny (plan 015, #1/#2/#6/#7). Reads execute; a curated set of
@@ -131,11 +130,14 @@ def _refusal_message(path: str) -> str:
 
 
 def _audit_reject(path: str, scope: str, error: str) -> None:
-    """Record a guard refusal (no Sierra contact) in the append-only audit log."""
+    """Record a guard refusal (no Sierra contact) in the append-only audit log.
+
+    Labelled with ``token_subject`` (not ``actor``) so auditing a refusal never itself
+    raises ``PermissionError`` when the caller is authenticated-but-not-allowlisted."""
     audit.audit_reject(
         context.get_conn(),
         tenant_id=context.TENANT_ID,
-        actor=context.actor(),
+        actor=context.token_subject(),
         tool="sierra_call",
         action="call",
         scope=scope,
@@ -171,15 +173,20 @@ def sierra_call(path: str, body: dict | None = None, confirm_token: str | None =
         raise ValueError(msg)
 
     if kind == "read":
-        require_scope(context.granted_scopes(), "read")
         conn = context.get_conn()
+        # Enforce identity (allowlist) + read scope, auditing any denial — the Tier-2 read
+        # path must consult the same gate as the Tier-1 reads (New-3) and writes (#8).
+        actor = context.authorize(
+            conn, tool="sierra_call", action="call", scope="read",
+            endpoint=path, args_redacted={"path": path, "body": body},
+        )
         try:
             result = context.get_runtime().read(lambda c: c.call(path, body))
         except Exception as e:
             audit.audit_event(
                 conn,
                 tenant_id=context.TENANT_ID,
-                actor=context.actor(),
+                actor=actor,
                 tool="sierra_call",
                 action="call",
                 endpoint=path,
@@ -192,7 +199,7 @@ def sierra_call(path: str, body: dict | None = None, confirm_token: str | None =
         audit.audit_event(
             conn,
             tenant_id=context.TENANT_ID,
-            actor=context.actor(),
+            actor=actor,
             tool="sierra_call",
             action="call",
             endpoint=path,

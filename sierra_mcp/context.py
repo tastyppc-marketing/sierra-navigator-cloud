@@ -20,6 +20,7 @@ import sqlite3
 from fastmcp.server.dependencies import get_access_token
 
 from sierra_mcp import audit
+from sierra_mcp.guards import GuardError, require_scope
 from sierra_mcp.runtime import SierraRuntime
 
 # Single constant tenant + actor for the operator MVP.
@@ -103,6 +104,62 @@ def actor() -> str:
     if tok is None:
         return ACTOR
     return _require_allowed(tok.claims or {})
+
+
+def token_subject() -> str:
+    """Best-effort caller subject for AUDIT LABELLING ONLY — never raises, never gates.
+
+    Unlike :func:`actor`, this does NOT enforce the allowlist, so a denial can still be
+    recorded against the subject that was rejected (non-repudiation). Returns the token
+    email/sub, ``"authenticated"`` if a token carries neither, or the operator constant
+    when there is no token (dev)."""
+    tok = get_access_token()
+    if tok is None:
+        return ACTOR
+    claims = tok.claims or {}
+    return claims.get("email") or claims.get("sub") or "authenticated"
+
+
+def authorize(
+    conn,
+    *,
+    tool: str,
+    action: str,
+    scope: str,
+    endpoint: str | None = None,
+    entity_type: str | None = None,
+    entity_id=None,
+    args_redacted=None,
+    confirm_token: str | None = None,
+) -> str:
+    """Enforce per-identity access at a tool entry and AUDIT any denial before re-raising.
+
+    The single gate every tool (read / write / delete / generic) goes through:
+    :func:`granted_scopes` runs the subject allowlist (``PermissionError`` if the subject
+    is not allowlisted) and :func:`require_scope` checks the capability (``ScopeError`` if
+    missing). On denial we write a ``result="rejected"`` row labelled with
+    :func:`token_subject` (so an authenticated-but-unauthorized caller can't probe the
+    surface invisibly — #8/New-4) and re-raise. On success we return the enforced
+    :func:`actor`. Closes New-3 (reads now consult the allowlist, like writes/deletes)."""
+    try:
+        require_scope(granted_scopes(), scope)
+    except (PermissionError, GuardError) as e:
+        audit.audit_reject(
+            conn,
+            tenant_id=TENANT_ID,
+            actor=token_subject(),
+            tool=tool,
+            action=action,
+            scope=scope,
+            error=repr(e),
+            endpoint=endpoint,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            args_redacted=args_redacted,
+            confirm_token=confirm_token,
+        )
+        raise
+    return actor()
 
 
 # --------------------------------------------------------------------------- #

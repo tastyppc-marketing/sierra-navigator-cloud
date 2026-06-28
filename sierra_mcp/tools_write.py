@@ -32,7 +32,6 @@ from sierra_mcp.guards import (
     enforce_delete_call_cap,
     mint_token,
     redeem_token,
-    require_scope,
 )
 
 _DELETE_ENTITY_TYPES = ("content_page", "saved_search")
@@ -111,16 +110,15 @@ def guarded_write(
     """
     conn = context.get_conn()
     tenant = context.TENANT_ID
-    actor = context.actor()
 
-    # A scope refusal is audited (rejected) — labelled by the path it refused
-    # (a pre-mint "preview" vs a "commit") — and re-raised.
+    # Enforce identity (subject allowlist) + scope at the entry, auditing any denial
+    # (PermissionError / ScopeError) before re-raising. "preview" vs "commit" labels which
+    # path was refused; authorize returns the enforced actor for the success rows.
     reject_action = "commit" if confirm_token is not None else "preview"
-    with _audit_guard_rejections(
-        conn=conn, tenant=tenant, actor=actor, tool=tool, action=reject_action,
-        scope=scope, args_redacted=payload, confirm_token=confirm_token,
-    ):
-        require_scope(context.granted_scopes(), scope)
+    actor = context.authorize(
+        conn, tool=tool, action=reject_action, scope=scope,
+        args_redacted=payload, confirm_token=confirm_token,
+    )
 
     if confirm_token is None:
         minted = mint_token(
@@ -310,17 +308,20 @@ def propose_deletions(entity_type: str, ids: list, confirm_token: str | None = N
     conn = context.get_conn()
     runtime = context.get_runtime()
     tenant = context.TENANT_ID
-    actor = context.actor()
 
-    # A scope or per-call-cap refusal is audited (rejected) and re-raised before
-    # any live fetch — proposing must not be silently probeable either.
+    # Enforce identity + delete scope (audited on denial), then the per-call cap (also
+    # audited) — both before any live fetch; proposing must not be silently probeable.
+    actor = context.authorize(
+        conn, tool="propose_deletions", action="propose", scope="delete",
+        args_redacted={"entity_type": entity_type, "ids": list(ids)},
+        entity_type=entity_type,
+    )
     with _audit_guard_rejections(
         conn=conn, tenant=tenant, actor=actor, tool="propose_deletions",
         action="propose", scope="delete",
         args_redacted={"entity_type": entity_type, "ids": list(ids)},
         entity_type=entity_type,
     ):
-        require_scope(context.granted_scopes(), "delete")
         enforce_delete_call_cap(ids)
 
     candidates: list[dict] = []
@@ -405,18 +406,21 @@ def confirm_deletions(confirm_token: str, entity_type: str, confirmations: list)
     conn = context.get_conn()
     runtime = context.get_runtime()
     tenant = context.TENANT_ID
-    actor = context.actor()
 
     ids = [c["id"] for c in confirmations]
     payload = {"entity_type": entity_type, "ids": sorted(ids)}
-    # scope -> token-set integrity (hash-pinned) -> volume cap. A refusal at any of
-    # these is audited (rejected) and re-raised before any identity-locked delete.
+    # identity + delete scope (authorize) -> token-set integrity (hash-pinned) -> volume
+    # cap. A refusal at any of these is audited (rejected) and re-raised before any
+    # identity-locked delete fires.
+    actor = context.authorize(
+        conn, tool="confirm_deletions", action="delete", scope="delete",
+        args_redacted=payload, confirm_token=confirm_token, entity_type=entity_type,
+    )
     with _audit_guard_rejections(
         conn=conn, tenant=tenant, actor=actor, tool="confirm_deletions",
         action="delete", scope="delete", args_redacted=payload,
         confirm_token=confirm_token, entity_type=entity_type,
     ):
-        require_scope(context.granted_scopes(), "delete")
         redeem_token(conn, confirm_token, tenant_id=tenant, tool="confirm_deletions", payload=payload)
         TRACKER.check_and_reserve(tenant, "delete", n=len(confirmations))
 
