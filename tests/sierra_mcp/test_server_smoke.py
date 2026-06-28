@@ -14,16 +14,28 @@ def test_app_is_asgi_callable():
     assert list(params) == ["scope", "receive", "send"]
 
 
-def test_exactly_the_read_tools_registered():
-    # M4: the registered set must EQUAL the 10 read tools. Adding any write/delete
-    # tool to this layer would break this test and protect the read-only contract.
+def test_registered_tools_equal_read_write_delete_union():
+    # The registered set must EQUAL read + write + delete exactly. Adding (or
+    # dropping) any tool breaks this test, keeping the layer's contract locked.
     tools = asyncio.run(server.mcp.list_tools())
     names = {t.name for t in tools}
-    assert names == set(server.READ_TOOL_NAMES)
+    expected = (
+        set(server.READ_TOOL_NAMES)
+        | set(server.WRITE_TOOL_NAMES)
+        | set(server.DELETE_TOOL_NAMES)
+    )
+    assert names == expected
     assert len(server.READ_TOOL_NAMES) == 10
-    # spot-check the documented gotcha tool + a get_*
-    assert "list_saved_searches" in names
-    assert "get_page" in names
+    assert len(server.WRITE_TOOL_NAMES) == 6
+    assert len(server.DELETE_TOOL_NAMES) == 2
+    assert len(names) == 18
+    # the three sets must be disjoint (no tool double-counted)
+    assert not (set(server.READ_TOOL_NAMES) & set(server.WRITE_TOOL_NAMES))
+    assert not (set(server.WRITE_TOOL_NAMES) & set(server.DELETE_TOOL_NAMES))
+    # spot-check representative tools
+    assert {"list_saved_searches", "get_page"} <= names          # read
+    assert "create_content_label" in names                       # write
+    assert {"propose_deletions", "confirm_deletions"} <= names   # delete
 
 
 def test_resources_registered():

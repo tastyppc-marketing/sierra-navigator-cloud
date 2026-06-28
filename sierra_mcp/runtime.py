@@ -104,3 +104,25 @@ class SierraRuntime:
         return call_with_refresh(
             self.broker, op, self._build_client, allow_write=False
         )
+
+    def write(self, op: Callable[[SierraHttpClient], object]) -> object:
+        """Run a write operation with a write-enabled client (``allow_write=True``).
+
+        Same one-shot session-refresh + always-close-transport semantics as
+        :meth:`read`. The guard layer (confirm tokens / scopes / volume caps) sits
+        ABOVE this in ``sierra_mcp.tools_write`` — this only flips ``allow_write``.
+        """
+        return call_with_refresh(
+            self.broker, op, self._build_client, allow_write=True
+        )
+
+    def delete(self, op: Callable[[SierraHttpClient], object]) -> object:
+        """Run an identity-locked delete with a write-enabled client.
+
+        Identical to :meth:`write` (deletes are gated by ``allow_write`` in
+        ``sierra_core``); kept separate so call sites read clearly and a future
+        policy split is a one-line change.
+        """
+        return call_with_refresh(
+            self.broker, op, self._build_client, allow_write=True
+        )

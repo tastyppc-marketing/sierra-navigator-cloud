@@ -14,10 +14,9 @@ import json
 from fastmcp import FastMCP
 from starlette.responses import JSONResponse
 
-from sierra_mcp import tools_read
+from sierra_mcp import context, tools_read, tools_write
 from sierra_mcp.auth import build_auth
 from sierra_mcp.catalogue import load_catalogue, verified_endpoints_markdown
-from sierra_mcp.runtime import SierraRuntime
 
 # --------------------------------------------------------------------------
 # Server + runtime
@@ -26,16 +25,22 @@ from sierra_mcp.runtime import SierraRuntime
 mcp = FastMCP(
     name="Sierra Navigator",
     instructions=(
-        "Read-only access to a Sierra Interactive real-estate admin backend: "
-        "content pages, saved searches, shared HTML widgets, blog posts, and "
-        "the filter/label vocab. Use the list_* tools to discover ids, then the "
-        "get_* tools to fetch a full record. The resource://sierra/endpoints* "
-        "resources document the broader (not-yet-exposed) backend API surface."
+        "Access to a Sierra Interactive real-estate admin backend: content pages, "
+        "saved searches, shared HTML widgets, blog posts, and the filter/label "
+        "vocab. READS: use the list_* tools to discover ids, then the get_* tools "
+        "for a full record. WRITES + DELETES are two-step: call the tool once with "
+        "no confirm_token to PREVIEW (nothing is sent to Sierra; you get a "
+        "confirm_token), then call again with that token to COMMIT. Deletes are "
+        "identity-locked: propose_deletions returns each record's stored title, "
+        "which you must echo back as expected_title in confirm_deletions. Deleting "
+        "a content page is IRREVERSIBLE. The resource://sierra/endpoints* resources "
+        "document the broader (not-yet-exposed) backend API surface."
     ),
     auth=build_auth(),
 )
 
-runtime = SierraRuntime()
+# One shared runtime (one SessionBroker / one Sierra login) for reads + writes.
+runtime = context.get_runtime()
 
 
 # --------------------------------------------------------------------------
@@ -238,6 +243,112 @@ READ_TOOL_NAMES: tuple[str, ...] = (
     "get_blog_post",
     "get_filters",
     "list_content_labels",
+)
+
+
+# --------------------------------------------------------------------------
+# Guarded write tools (two-step preview -> commit; scope "write")
+#
+# Each call with confirm_token=None PREVIEWS (mints a token, sends nothing to
+# Sierra). Call again with the returned token to COMMIT.
+# --------------------------------------------------------------------------
+
+@mcp.tool
+def create_content_label(name: str, page_id: int = -1, confirm_token: str | None = None) -> dict:
+    """Create a content label (optionally pre-linked to ``page_id``).
+
+    Two-step: omit ``confirm_token`` to preview + get a token, then call again
+    with it to commit. Returns the new label id on commit.
+    """
+    return tools_write.create_content_label(name, page_id=page_id, confirm_token=confirm_token)
+
+
+@mcp.tool
+def update_content_label(content_label_id: int, name: str, confirm_token: str | None = None) -> dict:
+    """Rename an existing content label. Two-step preview -> commit."""
+    return tools_write.update_content_label(content_label_id, name, confirm_token=confirm_token)
+
+
+@mcp.tool
+def remove_content_label(content_label_id: int, confirm_token: str | None = None) -> dict:
+    """Delete a content label by id. Two-step preview -> commit."""
+    return tools_write.remove_content_label(content_label_id, confirm_token=confirm_token)
+
+
+@mcp.tool
+def add_page_content_label_link(
+    page_id: int, content_label_id: int, confirm_token: str | None = None
+) -> dict:
+    """Link an existing content label to a content page. Two-step preview -> commit."""
+    return tools_write.add_page_content_label_link(
+        page_id, content_label_id, confirm_token=confirm_token
+    )
+
+
+@mcp.tool
+def remove_page_content_label_link(
+    page_id: int, content_label_id: int, confirm_token: str | None = None
+) -> dict:
+    """Unlink a content label from a content page. Two-step preview -> commit."""
+    return tools_write.remove_page_content_label_link(
+        page_id, content_label_id, confirm_token=confirm_token
+    )
+
+
+@mcp.tool
+def update_page_component_title(
+    component_link_id: int, title: str, confirm_token: str | None = None
+) -> dict:
+    """Rename a page component (by its component-link id). Two-step preview -> commit."""
+    return tools_write.update_page_component_title(
+        component_link_id, title, confirm_token=confirm_token
+    )
+
+
+WRITE_TOOL_NAMES: tuple[str, ...] = (
+    "create_content_label",
+    "update_content_label",
+    "remove_content_label",
+    "add_page_content_label_link",
+    "remove_page_content_label_link",
+    "update_page_component_title",
+)
+
+
+# --------------------------------------------------------------------------
+# Identity-locked delete tools (two-step propose -> confirm; scope "delete")
+# --------------------------------------------------------------------------
+
+@mcp.tool
+def propose_deletions(entity_type: str, ids: list[int], confirm_token: str | None = None) -> dict:
+    """PREVIEW a batch delete (step 1 of 2). Sends nothing destructive.
+
+    ``entity_type`` is ``"content_page"`` (HARD, IRREVERSIBLE delete) or
+    ``"saved_search"`` (soft, recoverable). Live-fetches each id and returns
+    ``candidates`` with each record's ``stored_title`` + ``reversible`` flag, plus
+    a ``confirm_token``. To delete, call ``confirm_deletions`` echoing each
+    ``stored_title`` back as ``expected_title``.
+    """
+    return tools_write.propose_deletions(entity_type, ids, confirm_token=confirm_token)
+
+
+@mcp.tool
+def confirm_deletions(confirm_token: str, entity_type: str, confirmations: list[dict]) -> dict:
+    """COMMIT a proposed batch delete (step 2 of 2), identity-locked.
+
+    ``confirmations`` is ``[{"id": <int>, "expected_title": <str>}, ...]`` — the
+    exact id-set from ``propose_deletions`` (a different set is rejected). Each
+    row is deleted only if ``expected_title`` matches the live stored title; a
+    mismatch aborts THAT row (marked ``ABORTED``) without failing the batch.
+    Content-page deletes are IRREVERSIBLE. A recovery snapshot is written to the
+    ledger before each delete.
+    """
+    return tools_write.confirm_deletions(confirm_token, entity_type, confirmations)
+
+
+DELETE_TOOL_NAMES: tuple[str, ...] = (
+    "propose_deletions",
+    "confirm_deletions",
 )
 
 

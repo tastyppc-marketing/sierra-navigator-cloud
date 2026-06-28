@@ -3,10 +3,12 @@
 Hosted, OAuth-secured **MCP server** that drives the Sierra Interactive real-estate
 admin backend over pure HTTP (no browser in the hot path). Wraps the browserless
 `sierra_core` client and exposes it to MCP clients (Claude Desktop, ChatGPT, Claude
-Code, …) behind WorkOS OAuth. The MCP layer is currently **read-only** (Tier-1);
-guarded writes + identity-locked delete land in **Phase 2b** (the `sierra_core`
-client already implements them behind `allow_write`, but no write/delete MCP tool
-is exposed yet).
+Code, …) behind WorkOS OAuth. The MCP layer exposes **reads**, **guarded writes**
+(two-step preview → confirm via one-time, hash-pinned confirm tokens), and
+**identity-locked deletes** (echo the stored title back to confirm; content-page
+deletes are irreversible, with a recovery snapshot to the ledger first). Full
+page create/edit writes (`save_content_page` & friends) are a deferred,
+live-testable follow-up — see `NOTES.md`.
 
 > Canonical home of `sierra_core` going forward. The local dev tree
 > (`Scraper Creator`) keeps a copy with a headed-browser login fallback for
