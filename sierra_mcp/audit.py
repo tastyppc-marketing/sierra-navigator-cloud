@@ -384,7 +384,15 @@ def ledger_record(
     cleanup_status: str | None = None,
     authorization: str | None = None,
 ) -> int:
-    """Append one ``ledger`` row (``created_at=now``); return its ``id``."""
+    """Append one ``ledger`` row (``created_at=now``); return its ``id``.
+
+    ``payload_snapshot`` is stored **VERBATIM** — it is the sole recovery record taken
+    before an irreversible delete, so redacting it (W1-T1's broad key regex stars
+    ``metaKeywords``/``password``) would make the entity non-reconstructable (New-5).
+    The immutable ``audit_log`` (args/before/after) is still scrubbed; only this
+    recovery column is verbatim. CARRY-FORWARD: the long-term control for secrets in
+    the snapshot is encryption-at-rest on this column, not lossy redaction.
+    """
     with transaction(conn):
         cur = conn.execute(
             """
@@ -399,7 +407,7 @@ def ledger_record(
                 _str_or_none(entity_id),
                 title_snapshot,
                 action,
-                _as_json(_redact(payload_snapshot)),
+                _as_json(payload_snapshot),  # VERBATIM recovery record (see docstring)
                 _bool_int(reversible),
                 cleanup_status,
                 authorization,

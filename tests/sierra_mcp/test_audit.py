@@ -306,7 +306,11 @@ def test_audit_event_redacts_before_and_after(conn):
     assert after["title"] == "T"
 
 
-def test_ledger_payload_snapshot_redacts_secret_named_keys(conn):
+def test_ledger_payload_snapshot_is_stored_verbatim(conn):
+    # re-audit New-5: the recovery snapshot is the SOLE record before an irreversible
+    # delete, so it is stored VERBATIM — redacting it (the original W1-T1 behavior)
+    # destroyed metaKeywords/password and made recovery impossible. The immutable
+    # audit_log (args/before/after) stays redacted; only this recovery column is verbatim.
     audit.ledger_record(
         conn, tenant_id="op", entity_type="widget", action="deleted",
         payload_snapshot={"id": 1, "name": "W", "apiKey": "xyz", "bearer": "b"},
@@ -314,8 +318,7 @@ def test_ledger_payload_snapshot_redacts_secret_named_keys(conn):
     snap = json.loads(
         conn.execute("SELECT payload_snapshot FROM ledger ORDER BY id DESC LIMIT 1").fetchone()[0]
     )
-    assert snap["id"] == 1 and snap["name"] == "W"
-    assert snap["apiKey"] == "***" and snap["bearer"] == "***"
+    assert snap == {"id": 1, "name": "W", "apiKey": "xyz", "bearer": "b"}
 
 
 def test_audit_reject_writes_a_rejected_row(conn):
