@@ -65,6 +65,11 @@ ssh myvps 'systemctl reload caddy'
 # 4e. VERIFY siblings still respond AND sierra now serves (expect 200/301/401/308, NOT connection errors)
 ssh myvps 'for h in mcp gads analytics control sierra; do printf "%s " $h; curl -sS -o /dev/null -w "%{http_code}\n" https://$h.tastyautomations.com/ ; done'
 ssh myvps 'systemctl is-active caddy; journalctl -u caddy -n 20 --no-pager | tail'
+
+# 4f. SERVER smoke over HTTPS (through Caddy):
+curl -sS -o /dev/null -w "health: %{http_code}\n" https://sierra.tastyautomations.com/health          # expect 200
+curl -sS https://sierra.tastyautomations.com/.well-known/oauth-protected-resource | head -c 400; echo  # expect JSON (auth-enforced mode)
+curl -sS -o /dev/null -w "mcp (no token): %{http_code}\n" https://sierra.tastyautomations.com/mcp/      # expect 401 once auth is enforced (or 200/406 in no-auth dev mode)
 ```
 
 ### ROLLBACK (run on ANY doubt — sibling not responding, validate fail, cert error)
