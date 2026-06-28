@@ -21,12 +21,14 @@ runtime via ``context.use``).
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any, Callable
 
 from sierra_core.errors import IdentityLockError
 from sierra_mcp import audit, context
 from sierra_mcp.guards import (
     TRACKER,
+    GuardError,
     enforce_delete_call_cap,
     mint_token,
     redeem_token,
@@ -44,6 +46,46 @@ def _warnings_for(tool: str) -> list[str]:
             "Removes an existing label/association. Verify the ids before confirming."
         )
     return warnings
+
+
+@contextmanager
+def _audit_guard_rejections(
+    *,
+    conn,
+    tenant: str,
+    actor: str,
+    tool: str,
+    action: str,
+    scope: str,
+    args_redacted: Any,
+    confirm_token: str | None = None,
+    entity_type: str | None = None,
+):
+    """Audit (``result="rejected"``) and re-raise any guardrail failure in the block.
+
+    Wraps the scope / confirm-token / volume-cap guard calls so a refusal that
+    happens BEFORE any Sierra contact still lands an immutable audit row (#8) — the
+    guardrails can't be probed invisibly. Only :class:`GuardError` is intercepted;
+    a commit/network failure keeps its own ``result="error"`` audit downstream, and
+    a per-row :class:`IdentityLockError` ABORT stays its own ``result="aborted"``
+    outcome (neither is a guard rejection).
+    """
+    try:
+        yield
+    except GuardError as e:
+        audit.audit_reject(
+            conn,
+            tenant_id=tenant,
+            actor=actor,
+            tool=tool,
+            action=action,
+            scope=scope,
+            args_redacted=args_redacted,
+            confirm_token=confirm_token,
+            entity_type=entity_type,
+            error=repr(e),
+        )
+        raise
 
 
 # --------------------------------------------------------------------------- #
@@ -71,7 +113,14 @@ def guarded_write(
     tenant = context.TENANT_ID
     actor = context.actor()
 
-    require_scope(context.granted_scopes(), scope)
+    # A scope refusal is audited (rejected) — labelled by the path it refused
+    # (a pre-mint "preview" vs a "commit") — and re-raised.
+    reject_action = "commit" if confirm_token is not None else "preview"
+    with _audit_guard_rejections(
+        conn=conn, tenant=tenant, actor=actor, tool=tool, action=reject_action,
+        scope=scope, args_redacted=payload, confirm_token=confirm_token,
+    ):
+        require_scope(context.granted_scopes(), scope)
 
     if confirm_token is None:
         minted = mint_token(
@@ -98,8 +147,13 @@ def guarded_write(
         }
 
     # commit: redeem (raises on mismatch/expiry/reuse) -> reserve -> run -> audit.
-    redeem_token(conn, confirm_token, tenant_id=tenant, tool=tool, payload=payload)
-    TRACKER.check_and_reserve(tenant, kind)
+    # A token/cap refusal here is audited (rejected) and re-raised before any call.
+    with _audit_guard_rejections(
+        conn=conn, tenant=tenant, actor=actor, tool=tool, action="commit",
+        scope=scope, args_redacted=payload, confirm_token=confirm_token,
+    ):
+        redeem_token(conn, confirm_token, tenant_id=tenant, tool=tool, payload=payload)
+        TRACKER.check_and_reserve(tenant, kind)
     try:
         result = commit()
     except Exception as e:
@@ -258,8 +312,16 @@ def propose_deletions(entity_type: str, ids: list, confirm_token: str | None = N
     tenant = context.TENANT_ID
     actor = context.actor()
 
-    require_scope(context.granted_scopes(), "delete")
-    enforce_delete_call_cap(ids)
+    # A scope or per-call-cap refusal is audited (rejected) and re-raised before
+    # any live fetch — proposing must not be silently probeable either.
+    with _audit_guard_rejections(
+        conn=conn, tenant=tenant, actor=actor, tool="propose_deletions",
+        action="propose", scope="delete",
+        args_redacted={"entity_type": entity_type, "ids": list(ids)},
+        entity_type=entity_type,
+    ):
+        require_scope(context.granted_scopes(), "delete")
+        enforce_delete_call_cap(ids)
 
     candidates: list[dict] = []
     deletable_ids: list = []
@@ -345,12 +407,18 @@ def confirm_deletions(confirm_token: str, entity_type: str, confirmations: list)
     tenant = context.TENANT_ID
     actor = context.actor()
 
-    require_scope(context.granted_scopes(), "delete")
-
     ids = [c["id"] for c in confirmations]
     payload = {"entity_type": entity_type, "ids": sorted(ids)}
-    redeem_token(conn, confirm_token, tenant_id=tenant, tool="confirm_deletions", payload=payload)
-    TRACKER.check_and_reserve(tenant, "delete", n=len(confirmations))
+    # scope -> token-set integrity (hash-pinned) -> volume cap. A refusal at any of
+    # these is audited (rejected) and re-raised before any identity-locked delete.
+    with _audit_guard_rejections(
+        conn=conn, tenant=tenant, actor=actor, tool="confirm_deletions",
+        action="delete", scope="delete", args_redacted=payload,
+        confirm_token=confirm_token, entity_type=entity_type,
+    ):
+        require_scope(context.granted_scopes(), "delete")
+        redeem_token(conn, confirm_token, tenant_id=tenant, tool="confirm_deletions", payload=payload)
+        TRACKER.check_and_reserve(tenant, "delete", n=len(confirmations))
 
     results: list[dict] = []
     for conf in confirmations:

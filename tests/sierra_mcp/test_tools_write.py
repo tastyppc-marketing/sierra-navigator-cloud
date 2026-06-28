@@ -374,3 +374,167 @@ def test_confirm_without_delete_scope_raises(ctx, monkeypatch):
             [{"id": 900, "expected_title": "Home"}],
         )
     assert "/content-pages.aspx/DeleteContentPage" not in [p for p, _ in ft.calls]
+
+
+# ========================================================================== #
+# W2-T10 (#8): guard REJECTIONS are audited (result="rejected") AND still raise.
+# A refusal that happens BEFORE any Sierra contact (bad scope / replayed-expired-
+# tampered token / volume cap) must leave an immutable trail — the guardrails
+# can't be probed invisibly. The per-row identity-lock ABORT is a separate,
+# already-audited outcome and must stay distinct from a guard rejection.
+# ========================================================================== #
+
+def _rejected_triples(conn):
+    return [
+        (r["tool"], r["action"], r["scope"])
+        for r in conn.execute(
+            "SELECT tool, action, scope FROM audit_log WHERE result = 'rejected'"
+        ).fetchall()
+    ]
+
+
+def _has_rejection(conn, tool, action):
+    return any(t == tool and a == action for t, a, _ in _rejected_triples(conn))
+
+
+# --- guarded_write: commit-path rejections -------------------------------- #
+
+def test_write_commit_missing_scope_audits_rejection(ctx, monkeypatch):
+    ft = ctx.wire({"/content-page-form.aspx/AddContentLabel": ok({"contentLabelId": 1})})
+    token = tools_write.create_content_label("L")["confirm_token"]  # minted with scope
+    monkeypatch.setattr(context, "granted_scopes", lambda: {"read"})
+    with pytest.raises(ScopeError):
+        tools_write.create_content_label("L", confirm_token=token)
+    assert _has_rejection(ctx.conn, "create_content_label", "commit")
+    assert ft.calls == []  # nothing reached Sierra
+
+
+def test_write_commit_token_reuse_audits_rejection(ctx):
+    ft = ctx.wire({"/content-page-form.aspx/AddContentLabel": ok({"contentLabelId": 1})})
+    token = tools_write.create_content_label("L")["confirm_token"]
+    tools_write.create_content_label("L", confirm_token=token)  # first commit ok
+    with pytest.raises(ConfirmTokenError):
+        tools_write.create_content_label("L", confirm_token=token)  # reuse rejected
+    assert _has_rejection(ctx.conn, "create_content_label", "commit")
+    assert len(ft.calls) == 1  # the rejected reuse never reached Sierra
+
+
+def test_write_commit_mutated_payload_audits_rejection(ctx):
+    ft = ctx.wire({"/content-page-form.aspx/AddContentLabel": ok({"contentLabelId": 1})})
+    token = tools_write.create_content_label("Original")["confirm_token"]
+    with pytest.raises(ConfirmTokenError):
+        tools_write.create_content_label("Mutated", confirm_token=token)  # hash mismatch
+    assert _has_rejection(ctx.conn, "create_content_label", "commit")
+    assert ft.calls == []
+
+
+def test_write_commit_volume_cap_audits_rejection(ctx, monkeypatch):
+    ft = ctx.wire({"/content-page-form.aspx/AddContentLabel": ok({"contentLabelId": 1})})
+    monkeypatch.setattr(TRACKER, "write_cap", 1)
+    t1 = tools_write.create_content_label("A")["confirm_token"]
+    tools_write.create_content_label("A", confirm_token=t1)  # 1st within cap
+    t2 = tools_write.create_content_label("B")["confirm_token"]
+    with pytest.raises(VolumeCapError):
+        tools_write.create_content_label("B", confirm_token=t2)  # 2nd over cap
+    assert _has_rejection(ctx.conn, "create_content_label", "commit")
+
+
+# --- guarded_write: dry-run-path rejection (scope checked before mint) ----- #
+
+def test_write_dry_run_missing_scope_audits_rejection_as_preview(ctx, monkeypatch):
+    ft = ctx.wire({})
+    monkeypatch.setattr(context, "granted_scopes", lambda: {"read"})
+    with pytest.raises(ScopeError):
+        tools_write.create_content_label("L")  # dry-run, no token
+    # scope is checked BEFORE the token is minted -> the rejection is a "preview"
+    assert _has_rejection(ctx.conn, "create_content_label", "preview")
+    assert ft.calls == []
+
+
+# --- propose_deletions rejections ----------------------------------------- #
+
+def test_propose_over_call_cap_audits_rejection(ctx, monkeypatch):
+    monkeypatch.setenv("SIERRA_MCP_DELETE_CALL_CAP", "2")
+    ft = ctx.wire({"/content-page-form.aspx/GetPage": ok({"page": {"id": 1, "name": "X"}})})
+    with pytest.raises(VolumeCapError):
+        tools_write.propose_deletions("content_page", [1, 2, 3])
+    assert _has_rejection(ctx.conn, "propose_deletions", "propose")
+    assert ft.calls == []  # cap is checked before any fetch
+
+
+def test_propose_missing_scope_audits_rejection(ctx, monkeypatch):
+    ft = ctx.wire({"/content-page-form.aspx/GetPage": ok({"page": {"id": 1, "name": "X"}})})
+    monkeypatch.setattr(context, "granted_scopes", lambda: {"read", "write"})
+    with pytest.raises(ScopeError):
+        tools_write.propose_deletions("content_page", [1])
+    assert _has_rejection(ctx.conn, "propose_deletions", "propose")
+    assert ft.calls == []
+
+
+# --- confirm_deletions rejections ----------------------------------------- #
+
+def test_confirm_missing_scope_audits_rejection(ctx, monkeypatch):
+    ft = ctx.wire({
+        "/content-page-form.aspx/GetPage": ok({"page": {"id": 900, "name": "Home"}}),
+        "/content-pages.aspx/DeleteContentPage": ok({"deleted": True}),
+    })
+    prop = tools_write.propose_deletions("content_page", [900])
+    monkeypatch.setattr(context, "granted_scopes", lambda: {"read", "write"})
+    with pytest.raises(ScopeError):
+        tools_write.confirm_deletions(
+            prop["confirm_token"], "content_page",
+            [{"id": 900, "expected_title": "Home"}],
+        )
+    assert _has_rejection(ctx.conn, "confirm_deletions", "delete")
+    assert "/content-pages.aspx/DeleteContentPage" not in [p for p, _ in ft.calls]
+
+
+def test_confirm_token_set_mismatch_audits_rejection(ctx):
+    ft = ctx.wire({
+        "/content-page-form.aspx/GetPage": ok({"page": {"id": 900, "name": "Home"}}),
+        "/content-pages.aspx/DeleteContentPage": ok({"deleted": True}),
+    })
+    prop = tools_write.propose_deletions("content_page", [900])  # proposed set = {900}
+    with pytest.raises(ConfirmTokenError):
+        tools_write.confirm_deletions(
+            prop["confirm_token"], "content_page",
+            [{"id": 900, "expected_title": "Home"},
+             {"id": 901, "expected_title": "Other"}],  # set {900,901} != {900}
+        )
+    assert _has_rejection(ctx.conn, "confirm_deletions", "delete")
+    assert "/content-pages.aspx/DeleteContentPage" not in [p for p, _ in ft.calls]
+
+
+def test_confirm_volume_cap_audits_rejection(ctx, monkeypatch):
+    ft = ctx.wire({
+        "/content-page-form.aspx/GetPage": ok({"page": {"id": 900, "name": "Home"}}),
+        "/content-pages.aspx/DeleteContentPage": ok({"deleted": True}),
+    })
+    prop = tools_write.propose_deletions("content_page", [900])
+    monkeypatch.setattr(TRACKER, "delete_cap", 0)  # any delete reservation trips the cap
+    with pytest.raises(VolumeCapError):
+        tools_write.confirm_deletions(
+            prop["confirm_token"], "content_page",
+            [{"id": 900, "expected_title": "Home"}],
+        )
+    assert _has_rejection(ctx.conn, "confirm_deletions", "delete")
+    assert "/content-pages.aspx/DeleteContentPage" not in [p for p, _ in ft.calls]
+
+
+# --- the identity-lock ABORT stays a distinct, already-audited outcome ----- #
+
+def test_identity_abort_audited_aborted_not_rejected(ctx):
+    ft = ctx.wire({
+        "/content-page-form.aspx/GetPage": ok({"page": {"id": 900, "name": "Actual Title"}}),
+        "/content-pages.aspx/DeleteContentPage": ok({"deleted": True}),
+    })
+    prop = tools_write.propose_deletions("content_page", [900])
+    out = tools_write.confirm_deletions(
+        prop["confirm_token"], "content_page",
+        [{"id": 900, "expected_title": "Wrong Title"}],  # identity mismatch -> ABORT
+    )
+    assert out["results"][0]["identity"] == "ABORTED"
+    triples = _audit_triples(ctx.conn)
+    assert ("confirm_deletions", "delete", "aborted") in triples
+    # an abort is NOT a guard rejection — it must not land a "rejected" row
+    assert ("confirm_deletions", "delete", "rejected") not in triples
