@@ -61,3 +61,19 @@ def test_local_mode_has_no_auth():
     # conftest pins the hermetic local-dev state (no AUTHKIT_DOMAIN +
     # SIERRA_MCP_ALLOW_NO_AUTH=1), so the imported server runs auth-disabled.
     assert server.mcp.auth is None
+
+
+def test_health_and_canonical_mcp_path():
+    """W1-T6 (#16): /health is reachable; the canonical MCP endpoint is /mcp (no
+    trailing slash, handled directly), and the /mcp/ form redirects to it — so docs
+    should advertise /mcp (no extra hop)."""
+    from starlette.testclient import TestClient
+
+    with TestClient(server.app) as c:
+        assert c.get("/health").status_code == 200
+        # /mcp is handled directly: a bare GET yields 406 (not a 3xx redirect).
+        assert c.get("/mcp", follow_redirects=False).status_code not in (301, 302, 307, 308)
+        # the trailing-slash form redirects to the canonical /mcp.
+        r = c.get("/mcp/", follow_redirects=False)
+        assert r.status_code in (307, 308)
+        assert r.headers["location"].rstrip("/").endswith("/mcp")

@@ -44,7 +44,7 @@ The server **fails closed**: if `AUTHKIT_DOMAIN` is unset it refuses to start un
 ```bash
 pip install -r requirements-dev.txt
 pytest                                   # 49 sierra_core tests + sierra_mcp tests
-uvicorn sierra_mcp.server:app --host 127.0.0.1 --port 8080   # serves MCP at /mcp/
+uvicorn sierra_mcp.server:app --host 127.0.0.1 --port 8080   # serves MCP at /mcp
 ```
 
 ## Deploy

@@ -3,7 +3,7 @@
 The hosted server speaks **MCP over Streamable HTTP** at:
 
 ```
-https://sierra.tastyautomations.com/mcp/
+https://sierra.tastyautomations.com/mcp
 ```
 
 Auth is **WorkOS OAuth** (OAuth 2.1 + Dynamic Client Registration + PKCE). Each client
@@ -17,14 +17,14 @@ sign-in — you approve once per client.
    **AuthKit domain** into the server's `AUTHKIT_DOMAIN` env, then recreate the container so it
    runs auth-enforced (drop `SIERRA_MCP_ALLOW_NO_AUTH`).
 3. Sanity: `curl https://sierra.tastyautomations.com/.well-known/oauth-protected-resource`
-   returns JSON pointing at your AuthKit domain; `curl …/mcp/` without a token returns **401**.
+   returns JSON pointing at your AuthKit domain; `curl …/mcp` without a token returns **401**.
 
 ## Per-client setup (each is the same OAuth dance)
 - **Claude Desktop / Claude web:** Settings → **Connectors** → *Add custom connector* → paste the
-  `/mcp/` URL → it opens the WorkOS sign-in → **approve**. The Sierra tools then appear.
-- **ChatGPT:** Settings → **Connectors / MCP** → add a custom MCP server → the `/mcp/` URL →
+  `/mcp` URL → it opens the WorkOS sign-in → **approve**. The Sierra tools then appear.
+- **ChatGPT:** Settings → **Connectors / MCP** → add a custom MCP server → the `/mcp` URL →
   approve the WorkOS sign-in.
-- **Codex / CoWork:** add the remote MCP server (the `/mcp/` URL) to the client's MCP config →
+- **Codex / CoWork:** add the remote MCP server (the `/mcp` URL) to the client's MCP config →
   approve the WorkOS sign-in.
 
 Because tools are discovered live (`tools/list` + `notifications/tools/list_changed`), once

@@ -5,7 +5,7 @@ Every tool here is a **read**: it drives ``sierra_core`` through ``SierraRuntime
 (session broker + auto re-auth) with ``allow_write=False``. Two resources expose
 the shipped endpoint catalogue. ``app`` is the ASGI entrypoint:
 
-    uvicorn sierra_mcp.server:app --host 127.0.0.1 --port 8080   # MCP at /mcp/
+    uvicorn sierra_mcp.server:app --host 127.0.0.1 --port 8080   # MCP at /mcp
 """
 from __future__ import annotations
 
@@ -37,6 +37,9 @@ mcp = FastMCP(
         "document the broader (not-yet-exposed) backend API surface."
     ),
     auth=build_auth(),
+    # Don't leak raw internal exception text (sqlite/thread/parse internals) to
+    # connected MCP clients; tools return curated errors instead (#17).
+    mask_error_details=True,
 )
 
 # One shared runtime (one SessionBroker / one Sierra login) for reads + writes.
@@ -420,6 +423,6 @@ async def health(request):  # noqa: ANN001 - Starlette Request
     return JSONResponse({"status": "ok"})
 
 
-# ASGI entrypoint. The MCP protocol is mounted at /mcp/ by default; /health is
+# ASGI entrypoint. The MCP protocol is mounted at /mcp by default; /health is
 # the custom route above. Must be built AFTER all tools/resources/routes register.
 app = mcp.http_app()
