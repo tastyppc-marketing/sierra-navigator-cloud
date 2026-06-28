@@ -47,6 +47,16 @@ def _warnings_for(tool: str) -> list[str]:
     return warnings
 
 
+def _client_error(e: Exception) -> str:
+    """A sanitized error string safe to RETURN to the MCP client (#17).
+
+    The verbatim ``repr(e)`` can echo upstream Sierra business-rule text, a stored title,
+    or HTTP internals, so the client-facing per-row ``error`` is just the exception class
+    name; the full ``repr(e)`` is preserved only in the immutable audit DB.
+    """
+    return type(e).__name__
+
+
 @contextmanager
 def _audit_guard_rejections(
     *,
@@ -330,7 +340,7 @@ def propose_deletions(entity_type: str, ids: list, confirm_token: str | None = N
         try:
             stored_title, reversible = _fetch_candidate(runtime, entity_type, entity_id)
         except Exception as e:  # fetch failed -> excluded from the deletable set
-            candidates.append({"id": entity_id, "error": repr(e)})
+            candidates.append({"id": entity_id, "error": _client_error(e)})
             continue
         candidates.append(
             {
@@ -460,7 +470,7 @@ def confirm_deletions(confirm_token: str, entity_type: str, confirmations: list)
                 error=repr(e),
             )
             results.append(
-                {"id": entity_id, "deleted": False, "identity": "ABORTED", "error": repr(e)}
+                {"id": entity_id, "deleted": False, "identity": "ABORTED", "error": _client_error(e)}
             )
             continue
         except Exception as e:
@@ -479,7 +489,7 @@ def confirm_deletions(confirm_token: str, entity_type: str, confirmations: list)
                 error=repr(e),
             )
             results.append(
-                {"id": entity_id, "deleted": False, "identity": "ERROR", "error": repr(e)}
+                {"id": entity_id, "deleted": False, "identity": "ERROR", "error": _client_error(e)}
             )
             continue
 

@@ -523,6 +523,30 @@ def test_confirm_volume_cap_audits_rejection(ctx, monkeypatch):
 
 # --- the identity-lock ABORT stays a distinct, already-audited outcome ----- #
 
+def test_returned_error_is_sanitized_while_audit_keeps_full_detail(ctx):
+    # #17: the per-row `error` RETURNED to the client is a generic class name (no verbatim
+    # upstream Sierra Message / stored title / HTTP internals); the full repr(e) is kept
+    # only in the immutable audit DB.
+    ft = ctx.wire({
+        "/content-page-form.aspx/GetPage": ok({"page": {"id": 900, "name": "Confidential Title"}}),
+        "/content-pages.aspx/DeleteContentPage": ok({"deleted": True}),
+    })
+    prop = tools_write.propose_deletions("content_page", [900])
+    out = tools_write.confirm_deletions(
+        prop["confirm_token"], "content_page",
+        [{"id": 900, "expected_title": "Wrong Title"}],  # identity mismatch -> ABORTED
+    )
+    row = out["results"][0]
+    assert row["identity"] == "ABORTED"
+    assert row["error"] == "IdentityLockError"          # sanitized class name only
+    assert "Confidential Title" not in row["error"]     # no upstream detail leaked to client
+    # the audit row keeps the full repr(e)
+    audit_err = ctx.conn.execute(
+        "SELECT error FROM audit_log WHERE tool='confirm_deletions' AND result='aborted'"
+    ).fetchone()["error"]
+    assert "IdentityLockError(" in audit_err            # full repr retained server-side
+
+
 def test_identity_abort_audited_aborted_not_rejected(ctx):
     ft = ctx.wire({
         "/content-page-form.aspx/GetPage": ok({"page": {"id": 900, "name": "Actual Title"}}),
