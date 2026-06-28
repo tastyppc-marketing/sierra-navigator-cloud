@@ -82,12 +82,16 @@ def _audit_triples(conn):
     ("/content-page-form.aspx/AddContentLabel", "write"),
     ("/x.aspx/UpdateThing", "write"),
     ("/x.aspx/SaveThing", "write"),
-    ("/x.aspx/RemoveThing", "write"),
     ("/x.aspx/SetFlag", "write"),
     ("/x.aspx/CreateWidget", "write"),
-    ("/x.aspx/DuplicateThing", "write"),   # classified write; refusal is separate
-    ("/x.aspx/DeleteThing", "delete"),
-    ("/action-plans.aspx/DeleteActionPlan", "delete"),
+    # default-deny: every destructive verb AND any unrecognized verb -> "refused"
+    ("/x.aspx/RemoveThing", "refused"),
+    ("/x.aspx/DuplicateThing", "refused"),
+    ("/x.aspx/DeleteThing", "refused"),
+    ("/action-plans.aspx/DeleteActionPlan", "refused"),
+    ("/x.aspx/MergeLeads", "refused"),
+    ("/leads.aspx/BulkDeleteLeads", "refused"),
+    ("/x.aspx/FrobnicateThing", "refused"),   # unrecognized verb -> default-deny
 ])
 def test_classify(path, expected):
     assert tools_generic.classify(path) == expected
@@ -189,31 +193,38 @@ def test_write_commit_token_reuse_rejected(ctx):
 
 
 # ========================================================================== #
-# delete-classified (non-locked) path — also guarded
+# default-deny: NO destruction via the generic caller (#1/#2/#6/#7)
 # ========================================================================== #
 
-def test_delete_classified_path_is_guarded(ctx):
-    # A Delete* path NOT in the locked set classifies "delete" and flows through the
-    # same dry-run -> confirm machine (scope delete, delete volume counter).
-    ft = ctx.wire({"/action-plans.aspx/DeleteActionPlan": ok({"deleted": True})})
-    body = {"actionPlanId": 42}
+def test_non_locked_delete_is_refused_and_audited(ctx):
+    # A Delete* on an entity WITHOUT a Tier-1 flow is refused outright (no raw post),
+    # and the refusal is recorded in the append-only audit log.
+    ft = ctx.wire({})
+    with pytest.raises(ValueError) as ei:
+        tools_generic.sierra_call("/action-plans.aspx/DeleteActionPlan", {"actionPlanId": 42})
+    assert "not available via the generic caller" in str(ei.value)
+    assert ft.calls == []
+    assert ("sierra_call", "call", "rejected") in _audit_triples(ctx.conn)
 
-    dry = tools_generic.sierra_call("/action-plans.aspx/DeleteActionPlan", body)
-    assert dry["mode"] == "dry_run"
-    assert dry["tool"] == "sierra_call:/action-plans.aspx/DeleteActionPlan"
+
+def test_remove_merge_bulk_refused(ctx):
+    ft = ctx.wire({})
+    for path in ("/widgets.aspx/RemoveHtmlWidget", "/leads.aspx/MergeLeads",
+                 "/saved-searches.aspx/MergeSavedSearches", "/leads.aspx/BulkDeleteLeads"):
+        with pytest.raises(ValueError):
+            tools_generic.sierra_call(path, {"id": 1})
     assert ft.calls == []
 
-    out = tools_generic.sierra_call(
-        "/action-plans.aspx/DeleteActionPlan", body, confirm_token=dry["confirm_token"]
-    )
-    assert out["mode"] == "committed"
-    path, sent = ft.calls[0]
-    assert path == "/action-plans.aspx/DeleteActionPlan"
-    assert sent == body  # verbatim
 
-
-def test_delete_classified_requires_delete_scope(ctx, monkeypatch):
-    ctx.wire({"/action-plans.aspx/DeleteActionPlan": ok({"deleted": True})})
-    monkeypatch.setattr(context, "granted_scopes", lambda: {"read", "write"})
-    with pytest.raises(ScopeError):
-        tools_generic.sierra_call("/action-plans.aspx/DeleteActionPlan", {"actionPlanId": 42})
+def test_every_catalogued_destructive_path_is_refused(ctx):
+    # Catalogue-driven regression: EVERY catalogued endpoint whose method is destructive
+    # must be refused by sierra_call — proving the whole 642-surface is covered, not a
+    # hand-picked few. NOT ONE may reach the FakeTransport.
+    ft = ctx.wire({})
+    destructive = [p for p in tools_generic._allowlist()
+                   if tools_generic._is_destructive(tools_generic._method_of(p))]
+    assert len(destructive) >= 40, f"expected many destructive paths, found {len(destructive)}"
+    for p in destructive:
+        with pytest.raises(ValueError):
+            tools_generic.sierra_call(p, {})
+    assert ft.calls == []  # not one destructive call reached Sierra
