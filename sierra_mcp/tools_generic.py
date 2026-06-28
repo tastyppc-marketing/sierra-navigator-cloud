@@ -17,6 +17,7 @@ quirk is the caller's (catalogue's) responsibility, not ours.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sierra_mcp import audit, context
@@ -41,13 +42,19 @@ _DESTRUCTIVE_VERBS = ("Delete", "Remove", "Merge", "Bulk", "Purge", "Clear", "Ar
                       # must never out-rank — esp. "Cancel", which the read verb "Can"
                       # used to swallow via a non-boundary prefix match.
                       "Cancel", "Disable", "Release", "Revoke", "Void", "Expire",
-                      "Terminate")
+                      "Terminate", "Clean")  # re-audit #3: +Clean
+_DESTRUCTIVE_SET = frozenset(_DESTRUCTIVE_VERBS)
 
 # Destructive name-fragments that appear MID-method (not as a leading verb) and are not
 # caught by a leading-verb match: "Delete" anywhere (BulkDeleteLeads) and "Deletion"
 # (SetClientDeletionStatusForSavedSearches — a soft-delete starting with write-verb
 # "Set"; note "Delete" is NOT a substring of "Deletion"). re-audit New-2.
 _DESTRUCTIVE_FRAGMENTS = ("Delete", "Deletion")
+
+# Split a CamelCase method into its word tokens, e.g. TestVoiceAndTextReleaseExpiredNumbers
+# -> [Test, Voice, And, Text, Release, Expired, Numbers]. Used to catch a destructive verb
+# sitting MID-name behind a benign leading verb (re-audit #3 HIGH).
+_CAMEL_TOKEN_RE = re.compile(r"[A-Z][a-z0-9]*")
 
 # Entity deletes that DO have a Tier-1 identity-locked flow — route the caller there.
 _TIER1_DELETE_HINTS = ("ContentPage", "SavedSearch")
@@ -96,10 +103,29 @@ def _starts_with_verb(method: str, verbs: tuple[str, ...]) -> bool:
 def _is_destructive(method: str) -> bool:
     """True for any data-destroying method — a destructive name-fragment anywhere
     ('Delete'/'Deletion', catching BulkDeleteLeads and SetClientDeletionStatus*) OR a
-    leading destructive verb at a token boundary (Remove*/Cancel*/Revoke*/…)."""
-    return any(frag in method for frag in _DESTRUCTIVE_FRAGMENTS) or _starts_with_verb(
+    destructive verb appearing as a CamelCase TOKEN ANYWHERE in the method, leading or
+    mid-name.
+
+    The token-anywhere check (re-audit #3 HIGH) closes the gap where a destructive verb
+    behind a benign leading verb — TestVoiceAndText**Release**ExpiredNumbers,
+    ...Manual**Disable**, ...**Clean**NumberReferences — used to classify as a guarded
+    'write' and commit through the generic caller with no snapshot / identity lock. Exact
+    token equality (not substring) avoids false positives like 'Archived' != 'Archive'.
+    """
+    # Delete/Deletion fragment anywhere, or a LEADING destructive verb -> destructive.
+    if any(frag in method for frag in _DESTRUCTIVE_FRAGMENTS) or _starts_with_verb(
         method, _DESTRUCTIVE_VERBS
-    )
+    ):
+        return True
+    # A would-be WRITE (anything not led by a read verb) that carries a destructive verb
+    # token MID-name is actually destructive — TestVoiceAndText**Release**ExpiredNumbers.
+    # A READ (led by Get/Check/Validate/…) is a query, so a destructive token there is
+    # benign (GetLeadsForMerge, CheckAbilityToRemoveAdminUser) and must stay read (#7).
+    if not _starts_with_verb(method, _READ_VERBS) and any(
+        tok in _DESTRUCTIVE_SET for tok in _CAMEL_TOKEN_RE.findall(method)
+    ):
+        return True
+    return False
 
 
 def classify(path: str) -> str:

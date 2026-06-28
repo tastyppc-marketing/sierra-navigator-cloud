@@ -265,6 +265,27 @@ def test_classify_token_boundary_and_new_destructive_verbs(path, expected):
     assert tools_generic.classify(path) == expected
 
 
+@pytest.mark.parametrize("path,expected", [
+    # re-audit #3 HIGH: a destructive verb MID-name (after a benign leading verb like "Test")
+    # is destructive — these 3 real catalogued voice-and-text ops are IRREVERSIBLE.
+    ("/voice-and-text-settings.aspx/TestVoiceAndTextReleaseExpiredNumbers", "refused"),
+    ("/voice-and-text-settings.aspx/TestVoiceAndTextManualDisable", "refused"),
+    ("/voice-and-text-settings.aspx/TestVoiceAndTextCleanNumberReferences", "refused"),
+    ("/x.aspx/SaveAndPurgeOldCache", "refused"),   # Purge mid-name after write-verb Save
+    ("/x.aspx/UpdateThenRevokeKeys", "refused"),   # Revoke mid-name
+    # leading destructive still refused (regression)
+    ("/x.aspx/ReleaseNumbers", "refused"),
+    ("/x.aspx/CleanReferences", "refused"),        # Clean newly added
+    # benign read/write with NO destructive token are unaffected (no over-refusal)
+    ("/content-pages.aspx/GetFilters", "read"),
+    ("/content-pages.aspx/UpdateContentLabel", "write"),
+    ("/x.aspx/CanEditPage", "read"),
+    ("/x.aspx/GetArchivedList", "read"),           # "Archived" token != destructive verb "Archive"
+])
+def test_classify_destructive_verb_anywhere_in_method(path, expected):
+    assert tools_generic.classify(path) == expected
+
+
 def test_real_cancel_and_softdelete_endpoints_refused_e2e(ctx):
     # The three real catalogued mutation endpoints the re-audit flagged are refused +
     # audited, NOT executed on the live read/write path.
