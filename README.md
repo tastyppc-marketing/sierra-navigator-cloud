@@ -43,8 +43,11 @@ The server **fails closed**: if `AUTHKIT_DOMAIN` is unset it refuses to start un
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                   # 49 sierra_core tests + sierra_mcp tests
-uvicorn sierra_mcp.server:app --host 127.0.0.1 --port 8080   # serves MCP at /mcp
+pytest                                   # sierra_core + sierra_mcp tests
+# Launch ONLY via the module entrypoint (the container CMD). It binds SIERRA_MCP_BIND_HOST —
+# the SAME value the no-auth gate checks — so the socket can't diverge from the gate. Do NOT
+# run `uvicorn sierra_mcp.server:app --host <X>` directly (its --host bypasses that gate).
+SIERRA_MCP_BIND_HOST=127.0.0.1 SIERRA_MCP_ALLOW_NO_AUTH=1 python -m sierra_mcp.server   # local no-auth dev, MCP at /mcp
 ```
 
 ## Deploy

@@ -5,7 +5,13 @@ Every tool here is a **read**: it drives ``sierra_core`` through ``SierraRuntime
 (session broker + auto re-auth) with ``allow_write=False``. Two resources expose
 the shipped endpoint catalogue. ``app`` is the ASGI entrypoint:
 
-    uvicorn sierra_mcp.server:app --host 127.0.0.1 --port 8080   # MCP at /mcp
+    python -m sierra_mcp.server   # the ONLY supported launcher (MCP at /mcp)
+
+Launch ONLY via ``python -m sierra_mcp.server`` (the container CMD): it binds
+``SIERRA_MCP_BIND_HOST`` — the SAME value the no-auth gate checks — so the socket can't
+diverge from the gate. Do NOT run ``uvicorn sierra_mcp.server:app --host <X>`` directly:
+its ``--host`` binds independently of that env var, so a no-auth dev config could bind a
+public interface behind a gate that still thinks it's loopback (re-audit #4 deploy-exposure).
 """
 from __future__ import annotations
 
