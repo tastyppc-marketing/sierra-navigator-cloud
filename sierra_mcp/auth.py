@@ -24,6 +24,10 @@ log = logging.getLogger(__name__)
 # Accepted truthy values for the auth-disabled opt-in.
 _TRUTHY = {"1", "true", "yes", "on"}
 
+# Hosts where running unauthenticated is tolerated (local dev). Anything else —
+# including an unset bind host — is treated as network-reachable (fail-closed).
+_LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
 
 def build_auth(env: dict | None = None) -> Any | None:
     """Return a configured ``AuthKitProvider`` or ``None`` (auth-disabled mode).
@@ -46,6 +50,8 @@ def build_auth(env: dict | None = None) -> Any | None:
     allow_no_auth = (
         (environ.get("SIERRA_MCP_ALLOW_NO_AUTH") or "").strip().lower() in _TRUTHY
     )
+    bind_host = (environ.get("SIERRA_MCP_BIND_HOST") or "").strip().lower()
+    is_loopback = bind_host in _LOOPBACK
 
     if not authkit_domain:
         if not allow_no_auth:
@@ -54,9 +60,20 @@ def build_auth(env: dict | None = None) -> Any | None:
                 "Set AUTHKIT_DOMAIN (production), or set SIERRA_MCP_ALLOW_NO_AUTH=1 "
                 "to explicitly run unauthenticated for local dev."
             )
+        if not is_loopback:
+            # The opt-in is honored ONLY when binding a loopback interface. An unset
+            # or network-reachable bind host must never serve the delete-capable
+            # tools unauthenticated (#13).
+            raise RuntimeError(
+                "Refusing to run unauthenticated on a non-loopback bind "
+                f"(SIERRA_MCP_BIND_HOST={bind_host or '<unset>'}). "
+                "SIERRA_MCP_ALLOW_NO_AUTH is honored only when binding 127.0.0.1/"
+                "localhost/::1 (local dev). For any network-reachable bind set "
+                "AUTHKIT_DOMAIN and run auth-enforced."
+            )
         log.warning(
-            "AUTHKIT_DOMAIN is unset and SIERRA_MCP_ALLOW_NO_AUTH is set -- starting "
-            "in AUTH-DISABLED local mode (no OAuth; DEV ONLY). Never do this in prod."
+            "AUTHKIT_DOMAIN is unset and SIERRA_MCP_ALLOW_NO_AUTH is set with a "
+            "loopback bind -- AUTH-DISABLED local mode (no OAuth; DEV ONLY)."
         )
         return None
 

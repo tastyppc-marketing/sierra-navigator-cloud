@@ -12,3 +12,6 @@ import os
 os.environ.pop("AUTHKIT_DOMAIN", None)
 os.environ.pop("MCP_PUBLIC_BASE_URL", None)
 os.environ["SIERRA_MCP_ALLOW_NO_AUTH"] = "1"
+# No-auth is honored only on a loopback bind (sierra_mcp.auth, #13); pin it so the
+# server import stays in legal auth-disabled mode for the suite.
+os.environ["SIERRA_MCP_BIND_HOST"] = "127.0.0.1"

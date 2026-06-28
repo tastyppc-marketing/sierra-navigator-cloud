@@ -10,9 +10,21 @@ def test_fails_closed_when_domain_unset_and_no_optin():
         build_auth({})
 
 
-def test_local_mode_returns_none_with_explicit_optin():
-    # I2: unset domain + SIERRA_MCP_ALLOW_NO_AUTH=1 -> None (auth-disabled dev mode).
-    assert build_auth({"SIERRA_MCP_ALLOW_NO_AUTH": "1"}) is None
+def test_local_mode_returns_none_with_optin_on_loopback():
+    # unset domain + opt-in + loopback bind -> None (auth-disabled dev mode).
+    assert build_auth({
+        "SIERRA_MCP_ALLOW_NO_AUTH": "1",
+        "SIERRA_MCP_BIND_HOST": "127.0.0.1",
+    }) is None
+
+
+def test_no_auth_refused_on_non_loopback_bind_even_with_optin():
+    # #13: the opt-in must NOT enable no-auth on a network-reachable bind.
+    with pytest.raises(RuntimeError):
+        build_auth({"SIERRA_MCP_ALLOW_NO_AUTH": "1", "SIERRA_MCP_BIND_HOST": "0.0.0.0"})
+    # An UNSET bind host is treated as non-loopback (fail-closed).
+    with pytest.raises(RuntimeError):
+        build_auth({"SIERRA_MCP_ALLOW_NO_AUTH": "1"})
 
 
 def test_domain_without_base_url_raises():
