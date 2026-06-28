@@ -21,11 +21,12 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from uuid import uuid4
 
-from sierra_mcp.audit import now_iso  # noqa: F401  (re-exported for callers' convenience)
+from sierra_mcp.audit import now_iso, transaction  # noqa: F401  (re-exported for callers)
 
 # Recognised scopes (coarse capability gate).
 SCOPES = ("read", "write", "delete")
@@ -140,15 +141,13 @@ def redeem_token(
 
     Checks run in this order (each with a specific message): token exists ->
     not already used -> not expired -> tenant matches -> tool matches -> payload
-    hash matches. The whole validate-and-spend runs inside a single
-    ``BEGIN IMMEDIATE`` transaction; the spend itself is a conditional
-    ``UPDATE ... WHERE used_at IS NULL`` whose ``rowcount`` is asserted, so even
-    a concurrent redeem of the same token can spend it only once.
+    hash matches. The whole validate-and-spend runs inside ``audit.transaction``
+    (the shared process RLock + ``BEGIN IMMEDIATE``), so concurrent redeems on the
+    single shared connection can't interleave; the spend is a conditional
+    ``UPDATE ... WHERE used_at IS NULL`` whose ``rowcount`` is asserted, so even a
+    concurrent redeem of the same token can spend it only once.
     """
-    began = not conn.in_transaction
-    if began:
-        conn.execute("BEGIN IMMEDIATE")
-    try:
+    with transaction(conn):
         row = conn.execute(
             "SELECT tenant_id, tool, payload_hash, expires_at, used_at "
             "FROM confirm_tokens WHERE token = ?",
@@ -176,12 +175,6 @@ def redeem_token(
         if spent.rowcount != 1:
             # Lost a race: another redeemer spent it between our check and here.
             raise ConfirmTokenError("confirm token already used (one-time use)")
-    except BaseException:
-        if began:
-            conn.rollback()
-        raise
-    if began:
-        conn.commit()
 
 
 # --------------------------------------------------------------------------- #
@@ -234,6 +227,7 @@ class VolumeTracker:
             else delete_cap
         )
         self._counts: dict[tuple[str, str], int] = {}
+        self._lock = threading.Lock()
 
     def _cap_for(self, kind: str) -> int:
         if kind == "write":
@@ -249,21 +243,26 @@ class VolumeTracker:
         """
         cap = self._cap_for(kind)
         key = (tenant_id, kind)
-        current = self._counts.get(key, 0)
-        if current + n > cap:
-            raise VolumeCapError(
-                f"{kind} session cap exceeded for tenant {tenant_id!r}: "
-                f"{current}+{n} > cap {cap}"
-            )
-        self._counts[key] = current + n
+        # Atomic check-and-increment so concurrent reservations can't both pass a
+        # stale count and collectively exceed the cap (#11).
+        with self._lock:
+            current = self._counts.get(key, 0)
+            if current + n > cap:
+                raise VolumeCapError(
+                    f"{kind} session cap exceeded for tenant {tenant_id!r}: "
+                    f"{current}+{n} > cap {cap}"
+                )
+            self._counts[key] = current + n
 
     def current(self, tenant_id: str, kind: str) -> int:
         """Current reserved count for ``(tenant_id, kind)`` (0 if none)."""
-        return self._counts.get((tenant_id, kind), 0)
+        with self._lock:
+            return self._counts.get((tenant_id, kind), 0)
 
     def reset(self) -> None:
         """Clear all counters (test hook / manual session reset)."""
-        self._counts.clear()
+        with self._lock:
+            self._counts.clear()
 
 
 # Process-wide singleton the tools use; tests call TRACKER.reset() between cases.

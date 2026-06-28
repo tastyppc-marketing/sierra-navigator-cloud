@@ -1,4 +1,5 @@
 """Tests for sierra_mcp.guards — confirm-token machine, scopes, volume caps."""
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -245,3 +246,53 @@ def test_module_singleton_reset_clears_counts():
     assert guards.TRACKER.current("op", "write") == 1
     guards.TRACKER.reset()
     assert guards.TRACKER.current("op", "write") == 0
+
+
+# --------------------------------------------------------------------------- #
+# W2-T9 (#11/#3): concurrency — atomic cap reserve + one-time redeem under load
+# --------------------------------------------------------------------------- #
+
+def test_concurrent_check_and_reserve_never_exceeds_cap():
+    t = VolumeTracker(write_cap=50, delete_cap=20)
+    granted = 0
+    glock = threading.Lock()
+
+    def worker():
+        nonlocal granted
+        try:
+            t.check_and_reserve("op", "delete", n=1)
+        except VolumeCapError:
+            return
+        with glock:
+            granted += 1
+
+    threads = [threading.Thread(target=worker) for _ in range(100)]  # 100 racing, cap 20
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert granted == 20                    # exactly the cap, never more
+    assert t.current("op", "delete") == 20
+
+
+def test_concurrent_redeem_spends_token_exactly_once(conn):
+    token = _mint(conn)["confirm_token"]
+    successes = 0
+    slock = threading.Lock()
+
+    def worker():
+        nonlocal successes
+        try:
+            guards.redeem_token(conn, token, tenant_id="op",
+                                tool="delete_content_page", payload=PAYLOAD)
+        except ConfirmTokenError:
+            return
+        with slock:
+            successes += 1
+
+    threads = [threading.Thread(target=worker) for _ in range(12)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert successes == 1                    # one-time, even under a 12-way race
