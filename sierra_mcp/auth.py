@@ -100,6 +100,24 @@ def build_auth(env: dict | None = None) -> Any | None:
             "(e.g. https://sierra.tastyautomations.com)."
         )
 
+    # #5: with auth enabled, an EMPTY subject allowlist is fail-OPEN — context.py grants
+    # any valid WorkOS token the full read+write+DELETE set. For a system with irreversible
+    # production deletes that is unacceptable, so refuse to boot until the operator names
+    # the allowed subjects explicitly. (Parsed exactly like context._subject_allowlist so a
+    # comma/whitespace-only value counts as empty.)
+    allowlist = {
+        s.strip()
+        for s in (environ.get("SIERRA_MCP_SUBJECT_ALLOWLIST") or "").split(",")
+        if s.strip()
+    }
+    if not allowlist:
+        raise RuntimeError(
+            "AUTHKIT_DOMAIN is set but SIERRA_MCP_SUBJECT_ALLOWLIST is empty. With auth "
+            "enabled an empty allowlist grants EVERY valid WorkOS token full read+write+"
+            "DELETE access (fail-open). Set SIERRA_MCP_SUBJECT_ALLOWLIST to a comma-"
+            "separated list of allowed subject emails/sub-ids (fail-closed)."
+        )
+
     try:
         from fastmcp.server.auth.providers.workos import AuthKitProvider
     except Exception as e:  # pragma: no cover - import-env dependent

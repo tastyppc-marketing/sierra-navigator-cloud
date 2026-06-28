@@ -37,11 +37,30 @@ def test_authkit_provider_constructed_when_both_set():
         provider = build_auth({
             "AUTHKIT_DOMAIN": "https://x.authkit.app",
             "MCP_PUBLIC_BASE_URL": "https://sierra.tastyautomations.com",
+            "SIERRA_MCP_SUBJECT_ALLOWLIST": "operator@firm.com",  # required when auth on
         })
     except RuntimeError as e:
         pytest.skip(f"AuthKitProvider unavailable in this env: {e}")
     assert provider is not None
     assert type(provider).__name__ == "AuthKitProvider"
+
+
+def test_auth_enabled_requires_nonempty_subject_allowlist():
+    # re-audit #5: with AUTHKIT_DOMAIN set, an EMPTY allowlist would grant every valid
+    # WorkOS token full read+write+DELETE (fail-open). Refuse to boot (fail-closed).
+    with pytest.raises(RuntimeError, match="ALLOWLIST"):
+        build_auth({
+            "AUTHKIT_DOMAIN": "https://x.authkit.app",
+            "MCP_PUBLIC_BASE_URL": "https://sierra.tastyautomations.com",
+            # SIERRA_MCP_SUBJECT_ALLOWLIST intentionally unset
+        })
+    # whitespace-only allowlist is also empty -> still refused
+    with pytest.raises(RuntimeError, match="ALLOWLIST"):
+        build_auth({
+            "AUTHKIT_DOMAIN": "https://x.authkit.app",
+            "MCP_PUBLIC_BASE_URL": "https://sierra.tastyautomations.com",
+            "SIERRA_MCP_SUBJECT_ALLOWLIST": "   ,  ",
+        })
 
 
 # ========================================================================== #
