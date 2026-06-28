@@ -44,10 +44,20 @@ _DB_PATH_ENV = "SIERRA_MCP_DB_PATH"
 # Keys whose values must never be persisted into the audit trail. Matched as a
 # substring, case-insensitively, against each key name at any nesting depth.
 _SECRET_KEY_RE = re.compile(
-    r"password|secret|token|key|authorization|cookie|bearer|session|jwt|api_key|auth",
+    r"password|passwd|passphrase|pwd|secret|credential|token|key|authorization|cookie|"
+    r"bearer|session|jwt|api_key|auth",
     re.IGNORECASE,
 )
 _REDACTED = "***"
+
+# Value-level secret detection (#14): scrub a string VALUE that is unambiguously a secret
+# REGARDLESS of its key name — a JWT, or an HTTP auth-scheme token. Deliberately narrow
+# (specific shapes, not "any long string") so the audit trail keeps ordinary ids/text.
+_SECRET_VALUE_RE = re.compile(
+    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+"   # JWT header.payload.sig
+    r"|(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{12,}",               # Authorization scheme token
+    re.IGNORECASE,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -226,6 +236,9 @@ def _redact(obj: Any) -> Any:
         return out
     if isinstance(obj, list):
         return [_redact(v) for v in obj]
+    # Value-level scrub: a secret-shaped string is starred even under an innocuous key (#14).
+    if isinstance(obj, str) and _SECRET_VALUE_RE.search(obj):
+        return _REDACTED
     return obj
 
 
