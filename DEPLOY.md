@@ -45,8 +45,11 @@ SIERRA_MCP_SUBJECT_ALLOWLIST=tastyppc@gmail.com
 EOF
 ssh myvps 'chmod 600 /root/sierra-mcp/.env'
 ```
-> Do NOT set `SIERRA_MCP_ALLOW_NO_AUTH` here — the container binds `0.0.0.0` and will refuse to start
-> with it (by design, #13). No-auth is only for a local `uvicorn --host 127.0.0.1` dev run.
+> Do NOT set `SIERRA_MCP_ALLOW_NO_AUTH` here. The entrypoint (`python -m sierra_mcp.server`) binds
+> `SIERRA_MCP_BIND_HOST` (default `0.0.0.0`) — the **same** value the no-auth gate checks, so they can't
+> diverge (#4/#13) — and the container leaves it at `0.0.0.0`, so no-auth is refused. No-auth is only for a
+> local dev run with **both** `SIERRA_MCP_ALLOW_NO_AUTH=1` and `SIERRA_MCP_BIND_HOST=127.0.0.1` set.
+> `SIERRA_MCP_SUBJECT_ALLOWLIST` is **required** with auth on — an empty allowlist refuses to boot (#5).
 
 ## 4. Build + start the container (auth-enforced, localhost-only) and PROVE auth is on
 ```bash
