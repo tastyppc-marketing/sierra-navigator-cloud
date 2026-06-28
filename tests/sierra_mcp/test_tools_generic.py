@@ -228,3 +228,51 @@ def test_every_catalogued_destructive_path_is_refused(ctx):
         with pytest.raises(ValueError):
             tools_generic.sierra_call(p, {})
     assert ft.calls == []  # not one destructive call reached Sierra
+
+
+# ========================================================================== #
+# W4-T1 (re-audit New-1 CRIT, New-2 HIGH, residual #1/#2/#7): classifier soundness.
+# classify() must match verbs on CamelCase TOKEN BOUNDARIES (verb is the whole method
+# or is followed by an uppercase letter), not raw startswith — pre-fix the read prefix
+# "Can" swallowed the mutating verb "Cancel*". Plus the Cancel-family and name-fragment
+# soft-deletes ("Deletion", e.g. SetClientDeletionStatus*) are destructive.
+# ========================================================================== #
+
+@pytest.mark.parametrize("path,expected", [
+    # New-1: "Can" must NOT swallow the mutating "Cancel*" verb
+    ("/lead-detail.aspx/CancelScheduledMessage", "refused"),
+    ("/facebook-relogin.aspx/CancelNotification", "refused"),
+    ("/x.aspx/CancelAnything", "refused"),
+    # a genuine boolean "Can*" query still reads (Can + uppercase = a token boundary)
+    ("/x.aspx/CanEditPage", "read"),
+    # New-2: name-fragment soft-delete ("Deletion" is not substring "Delete"; starts "Set")
+    ("/saved-searches.aspx/SetClientDeletionStatusForSavedSearches", "refused"),
+    # newly-recognised destructive verbs
+    ("/x.aspx/DisableUser", "refused"),
+    ("/x.aspx/RevokeAccess", "refused"),
+    ("/x.aspx/VoidInvoice", "refused"),
+    ("/x.aspx/TerminateSession", "refused"),
+    ("/x.aspx/ReleaseNumber", "refused"),
+    ("/x.aspx/ExpireToken", "refused"),
+    # token boundary: a verb that merely prefixes a longer lowercase word is NOT that verb
+    ("/x.aspx/Setting", "refused"),    # "Set"+"ting" (lowercase) is not write-verb "Set"
+    ("/x.aspx/Isengard", "refused"),   # "Is"+"engard" (lowercase) is not read-verb "Is"
+    # sanity: real read/write verbs still classify (uppercase-next boundary)
+    ("/x.aspx/GetThing", "read"),
+    ("/x.aspx/SetThing", "write"),
+])
+def test_classify_token_boundary_and_new_destructive_verbs(path, expected):
+    assert tools_generic.classify(path) == expected
+
+
+def test_real_cancel_and_softdelete_endpoints_refused_e2e(ctx):
+    # The three real catalogued mutation endpoints the re-audit flagged are refused +
+    # audited, NOT executed on the live read/write path.
+    ft = ctx.wire({})
+    for path in ("/lead-detail.aspx/CancelScheduledMessage",
+                 "/facebook-relogin.aspx/CancelNotification",
+                 "/saved-searches.aspx/SetClientDeletionStatusForSavedSearches"):
+        with pytest.raises(ValueError):
+            tools_generic.sierra_call(path, {"id": 1})
+    assert ft.calls == []  # not one reached Sierra
+    assert ("sierra_call", "call", "rejected") in _audit_triples(ctx.conn)

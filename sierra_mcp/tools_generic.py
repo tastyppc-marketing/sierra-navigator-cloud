@@ -37,7 +37,18 @@ _WRITE_VERBS = ("Add", "Update", "Save", "Set", "Create", "Assign", "Unassign",
                 "Resume", "Hide")  # reviewed, non-destructive
 _DESTRUCTIVE_VERBS = ("Delete", "Remove", "Merge", "Bulk", "Purge", "Clear", "Archive",
                       "Trash", "Discard", "Duplicate", "Move", "Replace", "Reset",
-                      "Deactivate", "Unpublish")
+                      "Deactivate", "Unpublish",
+                      # re-audit New-1: state-destroying verbs the read/write allowlists
+                      # must never out-rank — esp. "Cancel", which the read verb "Can"
+                      # used to swallow via a non-boundary prefix match.
+                      "Cancel", "Disable", "Release", "Revoke", "Void", "Expire",
+                      "Terminate")
+
+# Destructive name-fragments that appear MID-method (not as a leading verb) and are not
+# caught by a leading-verb match: "Delete" anywhere (BulkDeleteLeads) and "Deletion"
+# (SetClientDeletionStatusForSavedSearches — a soft-delete starting with write-verb
+# "Set"; note "Delete" is NOT a substring of "Deletion"). re-audit New-2.
+_DESTRUCTIVE_FRAGMENTS = ("Delete", "Deletion")
 
 # Entity deletes that DO have a Tier-1 identity-locked flow — route the caller there.
 _TIER1_DELETE_HINTS = ("ContentPage", "SavedSearch")
@@ -67,24 +78,45 @@ def _method_of(path: str) -> str:
     return path.rsplit("/", 1)[-1]
 
 
+def _starts_with_verb(method: str, verbs: tuple[str, ...]) -> bool:
+    """True iff ``method`` begins with one of ``verbs`` at a CamelCase TOKEN BOUNDARY —
+    the verb is the entire method, or the char right after it is uppercase (a new word).
+
+    Load-bearing fix for re-audit New-1: a plain ``startswith`` let the read verb 'Can'
+    swallow the mutating verb 'Cancel' (and 'Set' swallow 'Setting'). Requiring an
+    uppercase boundary means 'Can' matches 'CanEditPage' but NOT 'CancelMessage'.
+    """
+    for v in verbs:
+        if method == v:
+            return True
+        if method.startswith(v) and len(method) > len(v) and method[len(v)].isupper():
+            return True
+    return False
+
+
 def _is_destructive(method: str) -> bool:
-    """True for any data-destroying verb — 'Delete' anywhere (BulkDeleteLeads,
-    DeleteContentPages) or a leading destructive verb (Remove/Merge/Purge/…)."""
-    return "Delete" in method or method.startswith(_DESTRUCTIVE_VERBS)
+    """True for any data-destroying method — a destructive name-fragment anywhere
+    ('Delete'/'Deletion', catching BulkDeleteLeads and SetClientDeletionStatus*) OR a
+    leading destructive verb at a token boundary (Remove*/Cancel*/Revoke*/…)."""
+    return any(frag in method for frag in _DESTRUCTIVE_FRAGMENTS) or _starts_with_verb(
+        method, _DESTRUCTIVE_VERBS
+    )
 
 
 def classify(path: str) -> str:
     """Required handling: ``"read"`` / ``"write"`` / ``"refused"`` (default-deny).
 
-    refused = any destructive verb (checked FIRST) OR any unrecognized verb (the
-    default — fail closed). read and write are explicit verb allowlists.
+    refused = destructive (checked FIRST) OR any unrecognized verb (the default — fail
+    closed). read/write are explicit verb allowlists matched at a CamelCase token
+    boundary (:func:`_starts_with_verb`), so a short read/write verb can never swallow a
+    longer destructive one.
     """
     method = _method_of(path)
     if _is_destructive(method):
         return "refused"
-    if method.startswith(_READ_VERBS):
+    if _starts_with_verb(method, _READ_VERBS):
         return "read"
-    if method.startswith(_WRITE_VERBS):
+    if _starts_with_verb(method, _WRITE_VERBS):
         return "write"
     return "refused"
 
