@@ -28,6 +28,9 @@ from sierra_mcp.catalogue import load_catalogue, verified_endpoints_markdown
 # Server + runtime
 # --------------------------------------------------------------------------
 
+_AUTH_PROVIDER = build_auth()
+_AUTH_DISABLED = _AUTH_PROVIDER is None
+
 mcp = FastMCP(
     name="Sierra Navigator",
     instructions=(
@@ -42,7 +45,7 @@ mcp = FastMCP(
         "a content page is IRREVERSIBLE. The resource://sierra/endpoints* resources "
         "document the broader (not-yet-exposed) backend API surface."
     ),
-    auth=build_auth(),
+    auth=_AUTH_PROVIDER,
     # Don't leak raw internal exception text (sqlite/thread/parse internals) to
     # connected MCP clients; tools return curated errors instead (#17).
     mask_error_details=True,
@@ -453,9 +456,36 @@ async def health(request):  # noqa: ANN001 - Starlette Request
     return JSONResponse({"status": "ok"})
 
 
+_LOOPBACK_CLIENT_HOSTS = {"127.0.0.1", "::1"}
+# Starlette's TestClient uses this in-process sentinel instead of a socket host.
+_IN_PROCESS_CLIENT_HOSTS = {"testclient"}
+
+
+class _LoopbackGuardMiddleware:
+    def __init__(self, app, *, auth_disabled: bool):  # noqa: ANN001
+        self.app = app
+        self.auth_disabled = auth_disabled
+
+    async def __call__(self, scope, receive, send):  # noqa: ANN001
+        if self.auth_disabled and scope["type"] == "http":
+            client = scope.get("client")
+            if (
+                client is not None
+                and client[0] not in _LOOPBACK_CLIENT_HOSTS
+                and client[0] not in _IN_PROCESS_CLIENT_HOSTS
+            ):
+                response = JSONResponse(
+                    {"error": "auth_disabled_loopback_only"},
+                    status_code=403,
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 # ASGI entrypoint. The MCP protocol is mounted at /mcp by default; /health is
 # the custom route above. Must be built AFTER all tools/resources/routes register.
-app = mcp.http_app()
+app = _LoopbackGuardMiddleware(mcp.http_app(), auth_disabled=_AUTH_DISABLED)
 
 
 # --------------------------------------------------------------------------
