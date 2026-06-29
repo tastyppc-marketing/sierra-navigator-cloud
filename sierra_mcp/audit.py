@@ -28,6 +28,7 @@ way), and it makes **no** network/Sierra calls.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -40,6 +41,10 @@ from typing import Any, Callable
 # given. ``*.db`` under ``data/`` is gitignored (see .gitignore).
 DEFAULT_DB_PATH = "./data/sierra_mcp.db"
 _DB_PATH_ENV = "SIERRA_MCP_DB_PATH"
+_LEDGER_KEY_ENV = "SIERRA_MCP_LEDGER_KEY"
+_ENC_PREFIX = "enc:fernet:v1:"
+
+_LOG = logging.getLogger(__name__)
 
 # Keys whose values must never be persisted into the audit trail. Matched as a
 # substring, case-insensitively, against each key name at any nesting depth.
@@ -58,6 +63,11 @@ _SECRET_VALUE_RE = re.compile(
     r"|(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{12,}",               # Authorization scheme token
     re.IGNORECASE,
 )
+
+_LEDGER_CIPHER_LOCK = threading.Lock()
+_LEDGER_CIPHER_CACHE_SET = False
+_LEDGER_CIPHER_CACHE_RAW: str | None = None
+_LEDGER_CIPHER_CACHE: Any = None
 
 
 # --------------------------------------------------------------------------- #
@@ -130,6 +140,15 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     init_schema(conn)
+    _ledger_cipher()
+    if (os.environ.get("AUTHKIT_DOMAIN") or "").strip() and not (
+        os.environ.get(_LEDGER_KEY_ENV) or ""
+    ).strip():
+        _LOG.warning(
+            "AUTHKIT_DOMAIN is set but %s is unset; ledger recovery snapshots "
+            "will be written in plaintext.",
+            _LEDGER_KEY_ENV,
+        )
     return conn
 
 
@@ -251,6 +270,70 @@ def _as_json(value: Any) -> str | None:
     if value is None or isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _ledger_cipher() -> Any:
+    """Return the configured Fernet/MultiFernet cipher, or ``None`` when unset.
+
+    The ``cryptography`` import is lazy so the default no-key path stays stdlib
+    only. The cache is keyed by the raw env-var value so tests and long-lived
+    processes can pick up key flips after :func:`_reset_ledger_cipher`.
+    """
+    global _LEDGER_CIPHER_CACHE_SET, _LEDGER_CIPHER_CACHE_RAW, _LEDGER_CIPHER_CACHE
+
+    raw = os.environ.get(_LEDGER_KEY_ENV, "")
+    with _LEDGER_CIPHER_LOCK:
+        if _LEDGER_CIPHER_CACHE_SET and raw == _LEDGER_CIPHER_CACHE_RAW:
+            return _LEDGER_CIPHER_CACHE
+
+        if not raw.strip():
+            cipher = None
+        else:
+            from cryptography.fernet import Fernet, MultiFernet
+
+            keys = [part.strip() for part in raw.split(",") if part.strip()]
+            if not keys:
+                raise ValueError(f"{_LEDGER_KEY_ENV} is set but contains no keys")
+            fernets = [Fernet(key.encode("ascii")) for key in keys]
+            cipher = fernets[0] if len(fernets) == 1 else MultiFernet(fernets)
+
+        _LEDGER_CIPHER_CACHE_SET = True
+        _LEDGER_CIPHER_CACHE_RAW = raw
+        _LEDGER_CIPHER_CACHE = cipher
+        return cipher
+
+
+def _reset_ledger_cipher() -> None:
+    """Clear the ledger cipher cache after tests change ``SIERRA_MCP_LEDGER_KEY``."""
+    global _LEDGER_CIPHER_CACHE_SET, _LEDGER_CIPHER_CACHE_RAW, _LEDGER_CIPHER_CACHE
+
+    with _LEDGER_CIPHER_LOCK:
+        _LEDGER_CIPHER_CACHE_SET = False
+        _LEDGER_CIPHER_CACHE_RAW = None
+        _LEDGER_CIPHER_CACHE = None
+
+
+def _encrypt_snapshot(text: str | None) -> str | None:
+    """Encrypt a serialized ledger snapshot when a ledger key is configured."""
+    if text is None:
+        return None
+    cipher = _ledger_cipher()
+    if cipher is None:
+        return text
+    return _ENC_PREFIX + cipher.encrypt(text.encode("utf-8")).decode("ascii")
+
+
+def _decrypt_snapshot(stored: str | None) -> str | None:
+    """Decrypt an encrypted ledger snapshot; pass through legacy plaintext rows."""
+    if stored is None or not stored.startswith(_ENC_PREFIX):
+        return stored
+    cipher = _ledger_cipher()
+    if cipher is None:
+        raise RuntimeError(
+            f"{_LEDGER_KEY_ENV} is required to read encrypted ledger snapshots"
+        )
+    token = stored[len(_ENC_PREFIX):].encode("ascii")
+    return cipher.decrypt(token).decode("utf-8")
 
 
 def _bool_int(value: Any) -> int | None:
@@ -405,6 +488,8 @@ def ledger_record(
     The immutable ``audit_log`` (args/before/after) is still scrubbed; only this
     recovery column is verbatim. CARRY-FORWARD: the long-term control for secrets in
     the snapshot is encryption-at-rest on this column, not lossy redaction.
+    When ``SIERRA_MCP_LEDGER_KEY`` is configured, this column is encrypted-at-rest;
+    otherwise it remains plaintext for backward-compatible no-key operation.
     """
     with transaction(conn):
         cur = conn.execute(
@@ -420,7 +505,7 @@ def ledger_record(
                 _str_or_none(entity_id),
                 title_snapshot,
                 action,
-                _as_json(payload_snapshot),  # VERBATIM recovery record (see docstring)
+                _encrypt_snapshot(_as_json(payload_snapshot)),
                 _bool_int(reversible),
                 cleanup_status,
                 authorization,
@@ -428,6 +513,19 @@ def ledger_record(
             ),
         )
         return int(cur.lastrowid)
+
+
+def ledger_snapshot(conn: sqlite3.Connection, ledger_id: int) -> Any:
+    """Return a ledger row's decrypted ``payload_snapshot``, or ``None`` if absent."""
+    row = conn.execute(
+        "SELECT payload_snapshot FROM ledger WHERE id = ?", (int(ledger_id),)
+    ).fetchone()
+    if row is None:
+        return None
+    stored = _decrypt_snapshot(row["payload_snapshot"])
+    if stored is None:
+        return None
+    return json.loads(stored)
 
 
 def ledger_mark_cleanup(
