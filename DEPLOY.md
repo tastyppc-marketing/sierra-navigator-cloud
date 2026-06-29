@@ -42,6 +42,9 @@ AUTHKIT_DOMAIN=https://<your-env>.authkit.app
 WORKOS_CLIENT_ID=client_01KW5KZANVNA94SYQ209S75740
 # Only YOUR WorkOS subject(s) may use the server (email or sub, comma-separated):
 SIERRA_MCP_SUBJECT_ALLOWLIST=tastyppc@gmail.com
+# Ledger encryption-at-rest (Phase B / #14) — set this or recovery snapshots are stored PLAINTEXT.
+# Generate once:  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+SIERRA_MCP_LEDGER_KEY=<operator-generates>
 EOF
 ssh myvps 'chmod 600 /root/sierra-mcp/.env'
 ```
@@ -106,22 +109,3 @@ CI builds → GHCR → `ssh myvps 'cd /root/sierra-mcp && docker compose pull &&
 drop `build: .` from compose and add `docker login ghcr.io` on the box (deploy token). Harden the
 workflow (SHA-pinned actions + a GitHub Environment approval gate + a forced-command deploy key, #15)
 before enabling auto-deploy.
-```
-
-Let me write this. Then commit W1-T7 (DEPLOY.md only — no code, no tests). That completes Wave 1.
-
-Actually — DEPLOY.md is a doc; no test. The suite is unaffected. Let me write it + commit.
-
-Wait — env.example also has SIERRA_MCP_ALLOW_NO_AUTH and should mention SIERRA_MCP_SUBJECT_ALLOWLIST + SIERRA_MCP_BIND_HOST. Should I update env.example too? It's referenced by the deploy. The W1-T7 task is DEPLOY.md, but env.example consistency matters (it lists the env vars). Let me update env.example to add SIERRA_MCP_SUBJECT_ALLOWLIST + SIERRA_MCP_BIND_HOST + note the no-auth-loopback rule. That's part of the auth/deploy hardening (touches the deploy story). Let me include it in W1-T7 (it's a doc/config file, no conflict).
-
-Actually, env.example was touched by W1-T1 (I added SIERRA_MCP_DB_PATH etc.). Let me add the new auth vars to env.example too. Let me do it as part of W1-T7.
-
-Let me write DEPLOY.md, then update env.example, then commit W1-T7.
-
-Let me write DEPLOY.md first.Writing the reordered `DEPLOY.md`.
-
-Now updating `env.example` to add the new auth vars (subject allowlist, bind host) — then committing W1-T7 to close Wave 1.
-
-
-<invoke name="Read">
-<parameter name="file_path">C:\Dev\sierra-navigator-cloud\env.example
