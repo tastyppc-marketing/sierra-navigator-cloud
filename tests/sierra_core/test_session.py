@@ -83,6 +83,41 @@ def test_concurrent_cold_start_logs_in_exactly_once():
     assert all(r.site_id == 4989 for r in results)
 
 
+def test_concurrent_force_refresh_with_same_stale_session_logs_in_exactly_once():
+    c = {"n": 0}
+
+    def slow_login():
+        c["n"] += 1
+        _time.sleep(0.05)
+        return Session(cookies={"k": f"v{c['n']}"},
+                       site_id=4989,
+                       base_url="https://client7.sierrainteractivedev.com")
+
+    b = SessionBroker(login_fn=slow_login, clock=FakeClock(), ttl_seconds=1800)
+    stale = b.get_session()
+    c["n"] = 0
+
+    results: list[Session] = []
+    errors: list[Exception] = []
+
+    def refresh():
+        try:
+            results.append(b.get_session(force_refresh=True, stale=stale))
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=refresh) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert c["n"] == 1
+    assert len({id(r) for r in results}) == 1
+    assert results[0] is not stale
+
+
 def test_invalidate_get_race_raises_no_attributeerror():
     c = {"n": 0}
     b = SessionBroker(login_fn=make_login(c), clock=FakeClock(), ttl_seconds=1800)

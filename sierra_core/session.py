@@ -155,7 +155,12 @@ class SessionBroker:
             return s
         return None
 
-    def get_session(self, force_refresh: bool = False) -> Session:
+    def get_session(
+        self,
+        force_refresh: bool = False,
+        *,
+        stale: Session | None = None,
+    ) -> Session:
         # Fast path: a fresh cached session needs no lock.
         if not force_refresh:
             cached = self._cached_if_fresh(self._clock())
@@ -169,6 +174,12 @@ class SessionBroker:
                 cached = self._cached_if_fresh(self._clock())
                 if cached is not None:
                     return cached
+            elif (
+                stale is not None
+                and self._session is not None
+                and self._session is not stale
+            ):
+                return self._session
             now = self._clock()
             s = self._login_fn()
             s.created_at = now

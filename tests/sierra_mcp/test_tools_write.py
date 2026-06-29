@@ -35,7 +35,7 @@ def err(code: int = 1, message: str = "boom") -> str:
 
 
 class _FakeBroker:
-    def get_session(self, force_refresh=False):
+    def get_session(self, force_refresh=False, *, stale=None):
         return object()
 
     def invalidate(self):

@@ -39,12 +39,16 @@ class FakeClient:
 
 class FakeBroker:
     def __init__(self):
-        self.get_calls = []   # records force_refresh per get_session()
+        self.sessions = [object(), object(), object()]
+        self._next = 0
+        self.get_calls = []   # records force_refresh + stale per get_session()
         self.invalidated = 0
 
-    def get_session(self, force_refresh=False):
-        self.get_calls.append(force_refresh)
-        return object()       # build_client_fn ignores the session here
+    def get_session(self, force_refresh=False, *, stale=None):
+        self.get_calls.append((force_refresh, stale))
+        session = self.sessions[self._next]
+        self._next += 1
+        return session        # build_client_fn ignores the session here
 
     def invalidate(self):
         self.invalidated += 1
@@ -97,8 +101,8 @@ def test_retries_exactly_once_on_logout_and_returns_good_result():
     result = call_with_refresh(broker, lambda c: c.do(), build)
 
     assert result == {"ok": True}
-    assert broker.invalidated == 1                  # stale session dropped
-    assert broker.get_calls == [False, True]        # 2nd fetch forces refresh
+    assert broker.invalidated == 0                  # stale session is threaded through
+    assert broker.get_calls == [(False, None), (True, broker.sessions[0])]
     assert c1._t.closed is True                     # stale transport closed
     assert c2._t.closed is True                     # retry transport also closed
     assert build.calls == [False, False]            # both clients read-only
@@ -113,7 +117,7 @@ def test_non_logout_error_propagates_without_retry():
         call_with_refresh(broker, lambda c: c.do(), build)
 
     assert broker.invalidated == 0
-    assert broker.get_calls == [False]              # never refreshed
+    assert broker.get_calls == [(False, None)]      # never refreshed
     assert build.calls == [False]
     assert c1._t.closed is True                     # closed even on error (no leak)
 
@@ -127,8 +131,8 @@ def test_second_logout_failure_propagates():
     with pytest.raises(EndpointError):
         call_with_refresh(broker, lambda c: c.do(), build)
 
-    assert broker.invalidated == 1
-    assert broker.get_calls == [False, True]        # exactly one retry, no more
+    assert broker.invalidated == 0
+    assert broker.get_calls == [(False, None), (True, broker.sessions[0])]
     assert c1._t.closed is True and c2._t.closed is True  # both transports closed
 
 
@@ -139,7 +143,7 @@ def test_happy_path_closes_transport_no_refresh():
 
     assert call_with_refresh(broker, lambda c: c.do(), build) == {"rows": []}
     assert broker.invalidated == 0
-    assert broker.get_calls == [False]
+    assert broker.get_calls == [(False, None)]
     assert c1._t.closed is True                     # I1: closed on the happy path
 
 
@@ -185,5 +189,6 @@ def test_runtime_read_refreshes_on_logout():
     rt = SierraRuntime(broker=broker, build_client_fn=build)
 
     assert rt.read(lambda c: c.do()) == {"ok": 2}
-    assert broker.invalidated == 1
+    assert broker.invalidated == 0
+    assert broker.get_calls == [(False, None), (True, broker.sessions[0])]
     assert build.calls == [False, False]

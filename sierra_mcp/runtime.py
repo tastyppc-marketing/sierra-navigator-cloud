@@ -56,8 +56,8 @@ def call_with_refresh(
     """Run ``op(client)`` against a live session, re-authenticating once on expiry.
 
     ``op`` is a callable ``(client) -> result``. If it raises an ``EndpointError``
-    that looks like a logged-out redirect, the broker is invalidated +
-    force-refreshed and ``op`` is retried exactly once on a fresh client. A second
+    that looks like a logged-out redirect, the broker is force-refreshed with
+    the caller's stale session and ``op`` is retried exactly once on a fresh client. A second
     failure (or any non-logout EndpointError) propagates unchanged.
 
     The per-request transport is ALWAYS closed after use (success, retry, or
@@ -74,9 +74,8 @@ def call_with_refresh(
     finally:
         _safe_close(client)  # close on success, on re-raise, and before retry
 
-    # Session expired: invalidate, re-auth, retry exactly once on a fresh client.
-    broker.invalidate()
-    sess = broker.get_session(force_refresh=True)
+    # Session expired: re-auth unless a peer already replaced this stale session.
+    sess = broker.get_session(force_refresh=True, stale=sess)
     client2 = build_client_fn(sess, allow_write=allow_write)
     try:
         return op(client2)  # a second failure here propagates
