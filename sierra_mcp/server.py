@@ -54,6 +54,27 @@ mcp = FastMCP(
 # One shared runtime (one SessionBroker / one Sierra login) for reads + writes.
 runtime = context.get_runtime()
 
+READ_ONLY_ANNOTATIONS = {
+    "readOnlyHint": True,
+    "openWorldHint": False,
+    "destructiveHint": False,
+}
+BOUNDED_WRITE_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "openWorldHint": False,
+    "destructiveHint": False,
+}
+BOUNDED_DESTRUCTIVE_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "openWorldHint": False,
+    "destructiveHint": True,
+}
+GENERIC_DESTRUCTIVE_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "openWorldHint": True,
+    "destructiveHint": True,
+}
+
 
 def _guarded_read(tool: str, fn):
     """Enforce per-identity access on a Tier-1 read, then run it.
@@ -71,7 +92,7 @@ def _guarded_read(tool: str, fn):
 # Tier-1 read tools (one per sierra_mcp.tools_read shaper)
 # --------------------------------------------------------------------------
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def get_page(page_id: int) -> dict:
     """Fetch one content page by id.
 
@@ -81,7 +102,7 @@ def get_page(page_id: int) -> dict:
     return _guarded_read("get_page", lambda c: tools_read.get_page(c, page_id=page_id))
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def list_content_pages(
     sort_by: int = 2,
     sort_direction: int = 0,
@@ -115,7 +136,7 @@ def list_content_pages(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def list_saved_searches(
     sort_by: int = 4,
     sort_direction: int = 0,
@@ -143,7 +164,7 @@ def list_saved_searches(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def get_saved_search(search_id: int) -> dict:
     """Fetch one saved search by id.
 
@@ -153,7 +174,7 @@ def get_saved_search(search_id: int) -> dict:
     return _guarded_read("get_saved_search", lambda c: tools_read.get_saved_search(c, search_id=search_id))
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def list_html_widgets(
     sort_by: int = 1,
     sort_direction: int = 1,
@@ -181,7 +202,7 @@ def list_html_widgets(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def get_widget(widget_id: int) -> dict:
     """Fetch one shared HTML widget by id.
 
@@ -191,7 +212,7 @@ def get_widget(widget_id: int) -> dict:
     return _guarded_read("get_widget", lambda c: tools_read.get_widget(c, widget_id=widget_id))
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def list_blog_posts(
     sort_by: int = 1,
     sort_direction: int = 1,
@@ -225,7 +246,7 @@ def list_blog_posts(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def get_blog_post(post_id: int) -> dict:
     """Fetch one blog post by id.
 
@@ -235,7 +256,7 @@ def get_blog_post(post_id: int) -> dict:
     return _guarded_read("get_blog_post", lambda c: tools_read.get_blog_post(c, post_id=post_id))
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def get_filters() -> dict:
     """Get the content-page filter vocabulary.
 
@@ -245,7 +266,7 @@ def get_filters() -> dict:
     return _guarded_read("get_filters", lambda c: tools_read.get_filters(c))
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
 def list_content_labels(sort_by: int = 1, sort_order: int = 0) -> dict:
     """List content labels (page taxonomy tags).
 
@@ -282,7 +303,7 @@ READ_TOOL_NAMES: tuple[str, ...] = (
 # Sierra). Call again with the returned token to COMMIT.
 # --------------------------------------------------------------------------
 
-@mcp.tool
+@mcp.tool(annotations=BOUNDED_WRITE_ANNOTATIONS)
 def create_content_label(name: str, page_id: int = -1, confirm_token: str | None = None) -> dict:
     """Create a content label (optionally pre-linked to ``page_id``).
 
@@ -292,19 +313,19 @@ def create_content_label(name: str, page_id: int = -1, confirm_token: str | None
     return tools_write.create_content_label(name, page_id=page_id, confirm_token=confirm_token)
 
 
-@mcp.tool
+@mcp.tool(annotations=BOUNDED_WRITE_ANNOTATIONS)
 def update_content_label(content_label_id: int, name: str, confirm_token: str | None = None) -> dict:
     """Rename an existing content label. Two-step preview -> commit."""
     return tools_write.update_content_label(content_label_id, name, confirm_token=confirm_token)
 
 
-@mcp.tool
+@mcp.tool(annotations=BOUNDED_DESTRUCTIVE_ANNOTATIONS)
 def remove_content_label(content_label_id: int, confirm_token: str | None = None) -> dict:
     """Delete a content label by id. Two-step preview -> commit."""
     return tools_write.remove_content_label(content_label_id, confirm_token=confirm_token)
 
 
-@mcp.tool
+@mcp.tool(annotations=BOUNDED_WRITE_ANNOTATIONS)
 def add_page_content_label_link(
     page_id: int, content_label_id: int, confirm_token: str | None = None
 ) -> dict:
@@ -314,7 +335,7 @@ def add_page_content_label_link(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=BOUNDED_DESTRUCTIVE_ANNOTATIONS)
 def remove_page_content_label_link(
     page_id: int, content_label_id: int, confirm_token: str | None = None
 ) -> dict:
@@ -324,7 +345,7 @@ def remove_page_content_label_link(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=BOUNDED_WRITE_ANNOTATIONS)
 def update_page_component_title(
     component_link_id: int, title: str, confirm_token: str | None = None
 ) -> dict:
@@ -348,7 +369,7 @@ WRITE_TOOL_NAMES: tuple[str, ...] = (
 # Identity-locked delete tools (two-step propose -> confirm; scope "delete")
 # --------------------------------------------------------------------------
 
-@mcp.tool
+@mcp.tool(annotations=BOUNDED_DESTRUCTIVE_ANNOTATIONS)
 def propose_deletions(entity_type: str, ids: list[int], confirm_token: str | None = None) -> dict:
     """PREVIEW a batch delete (step 1 of 2). Sends nothing destructive.
 
@@ -361,7 +382,7 @@ def propose_deletions(entity_type: str, ids: list[int], confirm_token: str | Non
     return tools_write.propose_deletions(entity_type, ids, confirm_token=confirm_token)
 
 
-@mcp.tool
+@mcp.tool(annotations=BOUNDED_DESTRUCTIVE_ANNOTATIONS)
 def confirm_deletions(confirm_token: str, entity_type: str, confirmations: list[dict]) -> dict:
     """COMMIT a proposed batch delete (step 2 of 2), identity-locked.
 
@@ -385,7 +406,7 @@ DELETE_TOOL_NAMES: tuple[str, ...] = (
 # Tier-2 generic caller (the guarded escape hatch over the whole catalogue)
 # --------------------------------------------------------------------------
 
-@mcp.tool
+@mcp.tool(annotations=GENERIC_DESTRUCTIVE_ANNOTATIONS)
 def sierra_call(path: str, body: dict | None = None, confirm_token: str | None = None) -> dict:
     """Generic caller for ANY catalogued Sierra endpoint (Tier-2 escape hatch).
 

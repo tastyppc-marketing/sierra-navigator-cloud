@@ -50,6 +50,45 @@ def test_registered_tools_equal_read_write_delete_generic_union():
     assert "sierra_call" in names                                 # generic
 
 
+def test_registered_tools_have_chatgpt_action_annotations():
+    """ChatGPT treats missing/null tool-impact hints as invalid app actions."""
+    tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
+
+    for name in server.READ_TOOL_NAMES:
+        assert tools[name].annotations is not None
+        assert tools[name].annotations.readOnlyHint is True
+        assert tools[name].annotations.openWorldHint is False
+        assert tools[name].annotations.destructiveHint is False
+
+    non_destructive_writes = {
+        "create_content_label",
+        "update_content_label",
+        "add_page_content_label_link",
+        "update_page_component_title",
+    }
+    for name in non_destructive_writes:
+        assert tools[name].annotations is not None
+        assert tools[name].annotations.readOnlyHint is False
+        assert tools[name].annotations.openWorldHint is False
+        assert tools[name].annotations.destructiveHint is False
+
+    destructive_tools = {
+        "remove_content_label",
+        "remove_page_content_label_link",
+        *server.DELETE_TOOL_NAMES,
+    }
+    for name in destructive_tools:
+        assert tools[name].annotations is not None
+        assert tools[name].annotations.readOnlyHint is False
+        assert tools[name].annotations.openWorldHint is False
+        assert tools[name].annotations.destructiveHint is True
+
+    assert tools["sierra_call"].annotations is not None
+    assert tools["sierra_call"].annotations.readOnlyHint is False
+    assert tools["sierra_call"].annotations.openWorldHint is True
+    assert tools["sierra_call"].annotations.destructiveHint is True
+
+
 def test_resources_registered():
     res = asyncio.run(server.mcp.list_resources())
     uris = {str(r.uri) for r in res}
