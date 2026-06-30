@@ -25,6 +25,9 @@ def env(inner: dict) -> str:
     return json.dumps({"d": json.dumps(inner)})
 
 
+NOTFOUND = env({"responseCode": 1, "message": "Page not found"})
+
+
 def ok(data) -> str:
     return env({"responseCode": 0, "data": data})
 
@@ -41,12 +44,48 @@ def _sink(_record):
 
 def test_delete_content_page_accepts_positive_ack():
     c = _client({
-        GETPAGE: ok({"page": {"id": 900, "name": "Home"}}),
+        GETPAGE: [ok({"page": {"id": 900, "name": "Home"}}), NOTFOUND],
         DELPAGE: ok({"deleted": True}),
     })
     assert c.delete_content_page(900, expected_title="Home", snapshot_sink=_sink) == {
         "deleted": 900, "reversible": False,
     }
+
+
+def test_delete_content_page_confirms_absence_after_ack():
+    ft = FakeTransport({
+        GETPAGE: [ok({"page": {"id": 900, "name": "Home"}}), NOTFOUND],
+        DELPAGE: ok({"deleted": True}),
+    })
+    c = SierraHttpClient(ft, site_id=SITE_ID, allow_write=True)
+    assert c.delete_content_page(900, expected_title="Home", snapshot_sink=_sink) == {
+        "deleted": 900, "reversible": False,
+    }
+    assert [path for path, _ in ft.calls].count(GETPAGE) == 2
+
+
+def test_delete_content_page_raises_if_page_still_present():
+    c = _client({
+        GETPAGE: [
+            ok({"page": {"id": 900, "name": "Home"}}),
+            ok({"page": {"id": 900, "name": "Home"}}),
+        ],
+        DELPAGE: ok({"deleted": True}),
+    })
+    with pytest.raises(EndpointError):
+        c.delete_content_page(900, expected_title="Home", snapshot_sink=_sink)
+
+
+def test_delete_content_page_raises_if_recheck_inconclusive():
+    c = _client({
+        GETPAGE: [
+            ok({"page": {"id": 900, "name": "Home"}}),
+            "<html><input name='txtUsername'></html>",
+        ],
+        DELPAGE: ok({"deleted": True}),
+    })
+    with pytest.raises(EndpointError):
+        c.delete_content_page(900, expected_title="Home", snapshot_sink=_sink)
 
 
 @pytest.mark.parametrize("del_response,label", [
@@ -69,7 +108,7 @@ def test_delete_accepts_bare_responsecode_zero():
     # accepted (matches the team's client fixtures). Only None / error-markers / a
     # business-rule message are failures.
     c = _client({
-        GETPAGE: ok({"page": {"id": 900, "name": "Home"}}),
+        GETPAGE: [ok({"page": {"id": 900, "name": "Home"}}), NOTFOUND],
         DELPAGE: env({"responseCode": 0}),
         GETSS: ok({"savedSearch": {"id": 77, "searchName": "LF"}}),
         DELSS: env({"responseCode": 0}),

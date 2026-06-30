@@ -43,6 +43,14 @@ def _assert_mutation_ack(result: Any, *, what: str) -> None:
     raise EndpointError(f"{what}: no response body — cannot confirm the mutation", raw=result)
 
 
+def _looks_like_page_absent(err: EndpointError) -> bool:
+    raw = err.raw
+    if not isinstance(raw, dict):
+        return False
+    message = raw.get("message") or raw.get("Message")
+    return isinstance(message, str) and "not found" in message.lower()
+
+
 class SierraHttpClient:
     """Browserless Sierra admin client.  Identical endpoint semantics to the
     legacy SierraXhrClient, but calls a Transport instead of page.evaluate(fetch)."""
@@ -267,6 +275,20 @@ class SierraHttpClient:
         if not self._allow_write:
             raise WriteNotAllowed(f"{op} requires allow_write=True")
 
+    def _assert_page_absent(self, page_id: int | str) -> None:
+        try:
+            record = self.get_page(page_id)
+        except EndpointError as err:
+            if _looks_like_page_absent(err):
+                return
+            raise
+        fetched_id = (record.get("page") or {}).get("id") if isinstance(record, dict) else None
+        raise EndpointError(
+            f"delete_content_page(id={page_id}): page still present after delete "
+            f"(re-fetch returned id={fetched_id!r}) - Sierra acknowledged but did not remove it",
+            raw=record,
+        )
+
     # ---- writes -------------------------------------------------------
 
     def add_content_label(self, name: str, page_id: int = -1) -> int:
@@ -459,6 +481,8 @@ class SierraHttpClient:
             {"pageId": int(page_id)},
         )
         _assert_mutation_ack(ack, what=f"delete_content_page(id={page_id})")
+        # Production calibration 2026-06-29: hard-deleted pages re-fetch as Page not found.
+        self._assert_page_absent(page_id)
         return {"deleted": int(page_id), "reversible": False}
 
     def delete_saved_search(
@@ -495,4 +519,5 @@ class SierraHttpClient:
             {"siteId": str(self.site_id), "savedSearchId": int(search_id)},
         )
         _assert_mutation_ack(ack, what=f"delete_saved_search(id={search_id})")
+        # Saved-search deletes are soft/recoverable; re-fetch by id still returns the record.
         return {"deleted": int(search_id), "reversible": True}

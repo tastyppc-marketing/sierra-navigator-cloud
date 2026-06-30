@@ -10,6 +10,17 @@ def test_fake_records_calls_and_returns_mapped_text():
     assert json.loads(out)["d"]
     assert ft.calls == [("/x/Get", {"a": 1})]
 
+def test_fake_supports_fifo_responses_and_preserves_static_responses():
+    ft = FakeTransport({
+        "/x/Sequence": ["A", "B"],
+        "/x/Static": "C",
+    })
+    assert ft.post_json("/x/Sequence", {}) == "A"
+    assert ft.post_json("/x/Sequence", {}) == "B"
+    assert ft.post_json("/x/Sequence", {}) == "B"
+    assert ft.post_json("/x/Static", {}) == "C"
+    assert ft.post_json("/x/Static", {}) == "C"
+
 def test_fake_unmapped_path_returns_error_envelope():
     ft = FakeTransport({})
     out = ft.post_json("/nope", {})

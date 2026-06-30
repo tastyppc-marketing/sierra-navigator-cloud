@@ -50,6 +50,10 @@ def _page_env(title):
     )})
 
 
+def _page_not_found_env():
+    return env({"responseCode": 1, "message": "Page not found"})
+
+
 def test_delete_content_page_identity_lock_blocks_mismatch():
     ft = FakeTransport({"/content-page-form.aspx/GetPage": _page_env("Real Title")})
     c = SierraHttpClient(ft, site_id=4989, allow_write=True)
@@ -62,7 +66,7 @@ def test_delete_content_page_identity_lock_blocks_mismatch():
 
 def test_delete_content_page_snapshots_then_deletes_on_match():
     ft = FakeTransport({
-        "/content-page-form.aspx/GetPage": _page_env("Real Title"),
+        "/content-page-form.aspx/GetPage": [_page_env("Real Title"), _page_not_found_env()],
         "/content-pages.aspx/DeleteContentPage": env({"responseCode": 0}),
     })
     c = SierraHttpClient(ft, site_id=4989, allow_write=True)

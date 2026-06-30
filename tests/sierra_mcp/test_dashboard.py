@@ -194,7 +194,11 @@ def test_preview_with_no_selection_is_friendly(ctx):
 
 def test_confirm_content_page_happy_pass_and_deletes(ctx):
     ft = ctx.wire({
-        "/content-page-form.aspx/GetPage": ok({"page": {"id": 900, "name": "Old Home"}}),
+        "/content-page-form.aspx/GetPage": [
+            ok({"page": {"id": 900, "name": "Old Home"}}),
+            ok({"page": {"id": 900, "name": "Old Home"}}),
+            err(1, "Page not found"),
+        ],
         "/content-pages.aspx/DeleteContentPage": ok({"deleted": True}),
     })
     pv = ctx.client.post("/preview", data={"entity_type": "content_page", "ids": "900"})

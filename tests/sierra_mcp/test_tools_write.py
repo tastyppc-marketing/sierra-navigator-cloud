@@ -251,7 +251,11 @@ def test_propose_unknown_entity_type_raises(ctx):
 
 def test_confirm_content_page_hard_delete_happy(ctx):
     ft = ctx.wire({
-        "/content-page-form.aspx/GetPage": ok({"page": {"id": 900, "name": "Old Home"}}),
+        "/content-page-form.aspx/GetPage": [
+            ok({"page": {"id": 900, "name": "Old Home"}}),
+            ok({"page": {"id": 900, "name": "Old Home"}}),
+            err(1, "Page not found"),
+        ],
         "/content-pages.aspx/DeleteContentPage": ok({"deleted": True}),
     })
     prop = tools_write.propose_deletions("content_page", [900])
@@ -330,7 +334,13 @@ def test_confirm_batch_one_pass_one_abort_does_not_fail_batch(ctx):
     # confirmed id (901) trips sierra_core's id-echo guard -> that row ABORTs while
     # 900 still deletes. Proves the batch continues past an aborted row.
     ft = ctx.wire({
-        "/content-page-form.aspx/GetPage": ok({"page": {"id": 900, "name": "Home"}}),
+        "/content-page-form.aspx/GetPage": [
+            ok({"page": {"id": 900, "name": "Home"}}),
+            ok({"page": {"id": 900, "name": "Home"}}),
+            ok({"page": {"id": 900, "name": "Home"}}),
+            err(1, "Page not found"),
+            ok({"page": {"id": 900, "name": "Home"}}),
+        ],
         "/content-pages.aspx/DeleteContentPage": ok({"deleted": True}),
     })
     prop = tools_write.propose_deletions("content_page", [900, 901])

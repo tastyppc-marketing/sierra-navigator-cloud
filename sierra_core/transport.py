@@ -40,14 +40,19 @@ class HttpxTransport:
 
 class FakeTransport:
     """Test double: returns a pre-mapped response per path, records calls."""
-    def __init__(self, responses: dict[str, str]):
+    def __init__(self, responses: dict[str, str | list[str]]):
         self._responses = responses
         self.calls: list[tuple[str, dict]] = []
 
     def post_json(self, path: str, body: dict) -> str:
         self.calls.append((path, body))
         if path in self._responses:
-            return self._responses[path]
+            response = self._responses[path]
+            if isinstance(response, list):
+                if len(response) > 1:
+                    return response.pop(0)
+                return response[0]
+            return response
         return json.dumps({"d": json.dumps({"responseCode": 1, "message": f"no fake for {path}"})})
 
     def close(self) -> None:
